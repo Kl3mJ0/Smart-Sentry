@@ -1,0 +1,20 @@
+# Local build and editor state
+**/build/
+**/.vscode/
+**/__pycache__/
+*.py[cod]
+.agents/
+.claude/
+.git-nested-backups/
+
+# Provisioning secrets and generated device identities
+**/*_key.pem
+Blonky/src/sentry_client_creds.h
+generated/*_sentry_client_creds.h
+sentry_app/creds.py
+sentry_app/sentry_app/creds.py
+PI_CLIENT_HANDOFF.md
+sentry_app.zip
+
+# Local scratch/design extraction
+extracted_design/
