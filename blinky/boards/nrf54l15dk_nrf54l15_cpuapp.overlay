@@ -1,0 +1,34 @@
+&pinctrl {
+	i2c21_default: i2c21_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 11)>,
+				<NRF_PSEL(TWIM_SCL, 1, 12)>;
+		};
+	};
+
+	i2c21_sleep: i2c21_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 11)>,
+				<NRF_PSEL(TWIM_SCL, 1, 12)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c21 {
+	status = "okay";
+	pinctrl-0 = <&i2c21_default>;
+	pinctrl-1 = <&i2c21_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+};
+
+/*
+ * AUX UART (uart30) - wired temp/humidity output, separate from the uart20
+ * console and the BLE link. Pinctrl (P0.00 TX / P0.01 RX / P0.02 RTS /
+ * P0.03 CTS) and current-speed are already defined by the nRF54L15 DK
+ * board files; enabling the instance is all that's needed here.
+ */
+&uart30 {
+	status = "okay";
+};
