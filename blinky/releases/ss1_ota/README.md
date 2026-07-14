@@ -1,11 +1,18 @@
 # SS1 BLE OTA test
 
-This release pair performs a real firmware update:
+The original 1.0.1 to 1.0.2 release pair performs a real firmware update.
+Version 1.0.3 fixes discovery in nRF Connect Device Manager by advertising
+the standard MCUmgr SMP service UUID:
 
-- `ss1_bootstrap_1.0.1.hex`: one-time wired image containing MCUboot and SS1 1.0.1.
-- `ss1_update_1.0.2.zip`: Android nRF Connect Device Manager update package.
-- `ss1_update_1.0.2.bin`: signed single-image payload for clients that request a BIN file.
-- `ss1_update_1.0.2_manifest.json`: generated package metadata.
+- `ss1_bootstrap_1.0.3.hex`: MCUboot and SS1 1.0.3 for a one-time USB flash.
+- `ss1_update_1.0.3.zip`: Android nRF Connect Device Manager update package.
+- `ss1_update_1.0.3.bin`: signed single-image payload for clients that request a BIN file.
+- `ss1_update_1.0.3_manifest.json`: generated package metadata.
+
+If Device Manager remains on **Connecting...** with firmware 1.0.1 or 1.0.2,
+flash `ss1_bootstrap_1.0.3.hex` once over USB. Those older images did not put
+the SMP UUID in their advertising packet, so the phone could discover the
+name but fail to open the management connection reliably.
 
 ## What actually happens
 
@@ -16,19 +23,24 @@ signature and boots 1.0.2. After SS1 has initialized its hardware, Bluetooth,
 settings and advertising, the application confirms the image so it remains
 installed after later resets.
 
-## One-time bootstrap
+## One-time 1.0.3 connection fix
 
 1. Turn SS2 off so it cannot connect to SS1 during the update test.
 2. Open nRF Connect for Desktop Programmer and select the SS1 DK.
 3. Erase or recover SS1. This intentionally clears the old non-MCUboot image,
    bonds and settings.
-4. Add `ss1_bootstrap_1.0.1.hex` and write it to SS1.
+4. Add `ss1_bootstrap_1.0.3.hex` and write it to SS1.
 5. Reset SS1 and check the serial terminal for:
 
-       MAIN STARTED - SS1 firmware 1.0.1
+       MAIN STARTED - SS1 firmware 1.0.3
 
-USB can remain connected for power and serial logging. Do not flash through
-the debugger again during the OTA part of the test.
+USB can remain connected for power and serial logging. Remove any cached
+`Joseph_BLE` bond from the phone, scan again, and connect in nRF Connect
+Device Manager. Firmware 1.0.3 advertises the SMP service explicitly.
+
+Because the bootstrap is already version 1.0.3, use a later 1.0.4-or-newer
+package for the next full over-the-air upgrade test. The 1.0.3 ZIP/BIN is
+provided for older devices that can already establish an SMP connection.
 
 ## Real BLE update
 
@@ -97,3 +109,9 @@ images, but this is not production security. Before deploying SS1 devices:
 - Bootstrap HEX: `58cae471d4a79d2ed700420178bc3e733994abf7d6268469e080fa3db0ac2430`
 - Update ZIP: `0fa55b98345c3bfc071bccb1b312c6de37093fc065fb54aefa7d57c7f6668ad0`
 - Update BIN: `60215060209b0ff66157d231c1f76ab5700956c95599cb52cf9835193b3b0375`
+
+Version 1.0.3 connection fix:
+
+- Bootstrap HEX: `f7d367b259051558e89acc40baea69650f799c4e02cba23ba4efdc31fb4653e3`
+- Update ZIP: `8f5be90d05f338678668124104c1046b76f3bf6940ae441dbeaa28ec9dee9d09`
+- Update BIN: `1fc54601665efb6c8c983ba0f169bd2e10b44bb5a60921a7d17b6353bd03b14f`

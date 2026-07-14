@@ -1,0 +1,20 @@
+{
+    "format-version": 1,
+    "time": 1784032438,
+    "files": [
+        {
+            "type": "application",
+            "board": "nrf54l15dk",
+            "soc": "nrf54l15",
+            "load_address": 65536,
+            "image_index": "0",
+            "slot_index_primary": "1",
+            "slot_index_secondary": "2",
+            "version_MCUBOOT": "1.0.3+0",
+            "size": 255668,
+            "file": "blinky.signed.bin",
+            "modtime": 1784032436
+        }
+    ],
+    "name": "blinky"
+}
