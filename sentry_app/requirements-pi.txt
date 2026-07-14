@@ -1,0 +1,3 @@
+# Pi extras for the real BLE driver (PySide6 itself comes from apt, see README)
+bleak>=0.21
+cryptography>=41

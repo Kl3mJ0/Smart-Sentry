@@ -1,0 +1,4 @@
+# UI (all platforms). On Raspberry Pi OS prefer the apt packages instead:
+#   sudo apt install python3-pyside6.qtcore python3-pyside6.qtgui \
+#                    python3-pyside6.qtqml python3-pyside6.qtquick
+PySide6>=6.6
