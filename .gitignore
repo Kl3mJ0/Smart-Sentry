@@ -18,3 +18,7 @@ sentry_app.zip
 
 # Local scratch/design extraction
 extracted_design/
+
+# Kept on feature/sentry-app rather than stable main
+sentry_app/
+Smart Sentry Dashboard (offline).html
