@@ -8,6 +8,9 @@ the standard MCUmgr SMP service UUID:
 - `ss1_update_1.0.3.zip`: Android nRF Connect Device Manager update package.
 - `ss1_update_1.0.3.bin`: signed single-image payload for clients that request a BIN file.
 - `ss1_update_1.0.3_manifest.json`: generated package metadata.
+- `ss1_update_1.0.4.zip`: forward-update test package for Device Manager.
+- `ss1_update_1.0.4.bin`: signed 1.0.4 single-image payload.
+- `ss1_update_1.0.4_manifest.json`: generated 1.0.4 package metadata.
 
 If Device Manager remains on **Connecting...** with firmware 1.0.1 or 1.0.2,
 flash `ss1_bootstrap_1.0.3.hex` once over USB. Those older images did not put
@@ -38,9 +41,26 @@ USB can remain connected for power and serial logging. Remove any cached
 `Joseph_BLE` bond from the phone, scan again, and connect in nRF Connect
 Device Manager. Firmware 1.0.3 advertises the SMP service explicitly.
 
-Because the bootstrap is already version 1.0.3, use a later 1.0.4-or-newer
-package for the next full over-the-air upgrade test. The 1.0.3 ZIP/BIN is
-provided for older devices that can already establish an SMP connection.
+The 1.0.3 ZIP/BIN is provided for older devices that can already establish an
+SMP connection. Use `ss1_update_1.0.4.zip` for the forward-update test.
+
+## Forward OTA validation: 1.0.2 to 1.0.4
+
+An observed 1.0.3 to 1.0.2 update proves that BLE upload, MCUboot swapping,
+reboot and image confirmation work, but it is a downgrade. This development
+MCUboot configuration does not yet reject older signed versions.
+
+1. Confirm the serial terminal currently reports firmware 1.0.2.
+2. Connect to `Joseph_BLE` in nRF Connect Device Manager.
+3. Select `ss1_update_1.0.4.zip` and choose **Test and Confirm**.
+4. Start the update and wait for SS1 to reboot.
+5. Confirm the serial terminal prints:
+
+       MAIN STARTED - SS1 firmware 1.0.4
+       OTA validation marker: BLE update 1.0.4 is running
+       OTA image confirmed; firmware 1.0.4 is now permanent
+
+6. Power-cycle SS1 and confirm it still reports firmware 1.0.4.
 
 ## Real BLE update
 
@@ -115,3 +135,8 @@ Version 1.0.3 connection fix:
 - Bootstrap HEX: `f7d367b259051558e89acc40baea69650f799c4e02cba23ba4efdc31fb4653e3`
 - Update ZIP: `8f5be90d05f338678668124104c1046b76f3bf6940ae441dbeaa28ec9dee9d09`
 - Update BIN: `1fc54601665efb6c8c983ba0f169bd2e10b44bb5a60921a7d17b6353bd03b14f`
+
+Version 1.0.4 forward-update test:
+
+- Update ZIP: `8bb10699b3bb9d11dac616a7961b7c7290709cfcb7037cb66608928efd2ac7f1`
+- Update BIN: `576aa2dd9e8216f119793605d0a62d460b2281b7e3605ae0e28c95cc85d14e8e`

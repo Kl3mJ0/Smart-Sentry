@@ -1065,6 +1065,7 @@ int main(void)
 	int64_t last_maint_button_ms = 0;
 
 	printk("\n\nMAIN STARTED - SS1 firmware %s\n", APP_VERSION_STRING);
+	printk("OTA validation marker: BLE update 1.0.4 is running\n");
 
 	ret = gpio_init_all();
 	if (ret < 0) {
