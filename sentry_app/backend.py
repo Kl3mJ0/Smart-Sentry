@@ -21,6 +21,9 @@ class SentryBackend(QObject):
     uptimeChanged = Signal()
     signalChanged = Signal()
     dataArrived = Signal()  # fires on every fresh sensor value (drives glow pulse)
+    deviceChanged = Signal()
+    updateChanged = Signal()
+    jobsChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,6 +35,15 @@ class SentryBackend(QObject):
         self._last_update = "--:--:--"
         self._uptime_sec = 0
         self._signal = 0
+        self._device_id = ""
+        self._device_name = "No SS1 discovered"
+        self._device_count = 0
+        self._device_position = 0
+        self._fw_version = "unknown"
+        self._update_status = "idle"
+        self._update_message = "Waiting for startup update check"
+        self._latest_version = ""
+        self._jobs = []
         self.driver = None  # assigned by main.py
 
         self._uptime_timer = QTimer(self)
@@ -75,6 +87,23 @@ class SentryBackend(QObject):
             self._signal = level
             self.signalChanged.emit()
 
+    def set_device(self, device_id: str, name: str, position: int, count: int, fw_version: str = "unknown"):
+        self._device_id, self._device_name = device_id, name
+        self._device_position, self._device_count = position, count
+        self._fw_version = fw_version or "unknown"
+        self.deviceChanged.emit()
+
+    def set_update_status(self, status: str, message: str, latest_version=None):
+        self._update_status = status or "idle"
+        self._update_message = message or ""
+        self._latest_version = latest_version or ""
+        self.updateChanged.emit()
+
+    def set_jobs(self, jobs):
+        self._jobs = jobs or []
+        self.jobsChanged.emit()
+        self.updateChanged.emit()
+
     def post(self, key: str, value):
         """Generic setter dispatch used by ble_driver.py (state name -> set_<name>)."""
         getattr(self, f"set_{key}")(value)
@@ -99,6 +128,21 @@ class SentryBackend(QObject):
     def reconnect(self):
         if self.driver:
             self.driver.reconnect()
+
+    @Slot()
+    def nextDevice(self):
+        if self.driver and hasattr(self.driver, "next_device"):
+            self.driver.next_device()
+
+    @Slot()
+    def previousDevice(self):
+        if self.driver and hasattr(self.driver, "previous_device"):
+            self.driver.previous_device()
+
+    @Slot()
+    def checkUpdates(self):
+        if self.driver and hasattr(self.driver, "check_updates"):
+            self.driver.check_updates()
 
     @Slot()
     def cycleConnState(self):
@@ -140,3 +184,36 @@ class SentryBackend(QObject):
     @Property(int, notify=signalChanged)
     def signalLevel(self):
         return self._signal
+
+    @Property(str, notify=deviceChanged)
+    def deviceId(self): return self._device_id
+
+    @Property(str, notify=deviceChanged)
+    def deviceName(self): return self._device_name
+
+    @Property(int, notify=deviceChanged)
+    def deviceCount(self): return self._device_count
+
+    @Property(int, notify=deviceChanged)
+    def devicePosition(self): return self._device_position
+
+    @Property(str, notify=deviceChanged)
+    def fwVersion(self): return self._fw_version
+
+    @Property(str, notify=updateChanged)
+    def updateStatus(self): return self._update_status
+
+    @Property(str, notify=updateChanged)
+    def updateMessage(self): return self._update_message
+
+    @Property(str, notify=updateChanged)
+    def latestVersion(self): return self._latest_version
+
+    @Property(int, notify=updateChanged)
+    def updateProgress(self):
+        active = next((j for j in self._jobs if j.get("state") in
+                       ("running", "uploading", "trial_pending", "checking_health", "confirming")), None)
+        return int(active.get("progress", 0)) if active else 0
+
+    @Property("QVariantList", notify=jobsChanged)
+    def jobs(self): return self._jobs

@@ -92,12 +92,11 @@ systemctl --user enable --now sentry-dashboard
 python main.py --screenshot frame.png   # saves a frame after 3 s and exits
 ```
 
-## sentry_agent/ - headless fleet service (new, not yet default)
+## sentry_agent/ - headless fleet and secure updater service
 
 The dashboard connecting to BLE directly (`--driver ble`) is fine for one
-device and one process, but doesn't scale to a fleet: every SS1 currently
-advertises as the same name, there's only one global connection/sensor
-set, and an independent OTA process would fight the dashboard for the
+device and one process, but doesn't scale to a fleet: there's only one global
+connection/sensor set, and an independent OTA process would fight the dashboard for the
 adapter. `sentry_agent/` is a separate headless service that owns BLE, the
 device inventory and OTA exclusively; the dashboard becomes a thin client
 of it via `--driver agent` (see `agent_driver.py`). Not switched on by
@@ -130,12 +129,17 @@ Then run `systemctl --user daemon-reload && systemctl --user restart
 sentry-dashboard`. Do not run `--driver ble` at the same time as
 `sentry-agent`; the agent is the sole owner of the Pi's Bluetooth adapter.
 
-Still open (see project OTA roadmap): immutable per-device IDs (today's
-`device_id` is just the BLE address - see `sentry_agent/inventory.py`),
-Pi-controlled image confirmation instead of SS1 confirming its own trial
-image, replacing the dev signing key, downgrade protection, and locking
-down the MCUmgr BLE endpoint. `sentry_agent/ota.py` uploads and trial-boots
-an image but deliberately never confirms one automatically.
+On startup the agent scans `firmware/**/manifest.json`, selects the newest
+local signed release and queues every connected older SS1 once. The dashboard
+Firmware / Queue button shows check state, target version, current device and
+upload/health/confirmation progress. Jobs are persistent and sequential.
 
-Detailed security and device-identity roadmap:
+Firmware on this branch advertises a permanent factory ID, certificate-gates
+MCUmgr, uses a local production MCUboot signing key, prevents downgrades and
+leaves every trial unconfirmed until the Pi observes 15 seconds of healthy,
+authenticated sensor data. Failed trials are rebooted into MCUboot rollback.
+Cloud release download is the remaining delivery-provider step; local files
+are deliberately used for hardware acceptance testing first.
+
+Detailed security and device-identity design:
 [`../docs/ota-auth-and-device-id.md`](../docs/ota-auth-and-device-id.md).

@@ -49,6 +49,8 @@ class FleetManager:
         self.state.setdefault(device_id, {})[key] = value
         if key == "conn_state":
             self.inventory.set_status(device_id, value)
+        elif key == "fw_version":
+            self.inventory.set_fw_version(device_id, value)
         for fn in self._state_listeners:
             fn(device_id, key, value)
 
@@ -79,6 +81,10 @@ class FleetManager:
     def _spawn_session(self, device_id, address, name):
         session = DeviceSession(device_id, address, name, self._on_state, self.discovery_lock)
         self.sessions[device_id] = session
+        # Metadata events let an already-open dashboard add this device to its
+        # selector immediately; it should not need to reconnect for a snapshot.
+        self._on_state(device_id, "name", name)
+        self._on_state(device_id, "address", address)
         self._tasks[device_id] = asyncio.create_task(session.run())
         print(f"[fleet] tracking {name} ({address}) as device_id={device_id}")
 

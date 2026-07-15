@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS ota_jobs (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     result TEXT,
+    progress INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
 );
 """
@@ -63,7 +64,18 @@ class Inventory:
     def __init__(self, db_path=DB_PATH):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.executescript(SCHEMA)
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(ota_jobs)")}
+        if "progress" not in columns:
+            self._conn.execute("ALTER TABLE ota_jobs ADD COLUMN progress INTEGER NOT NULL DEFAULT 0")
         self._conn.commit()
+        self._listeners = []
+
+    def add_listener(self, fn) -> None:
+        self._listeners.append(fn)
+
+    def _changed(self) -> None:
+        for fn in list(self._listeners):
+            fn()
 
     def upsert_device(self, address: str, name: str, status: str = "unknown") -> str:
         device_id = resolve_device_id(address, name)
@@ -97,6 +109,7 @@ class Inventory:
             "UPDATE devices SET fw_version=? WHERE device_id=?", (fw_version, device_id)
         )
         self._conn.commit()
+        self._changed()
 
     def list_devices(self) -> list[dict]:
         cur = self._conn.execute(
@@ -114,7 +127,16 @@ class Inventory:
             (device_id, image_path, target_version, now, now),
         )
         self._conn.commit()
+        self._changed()
         return cur.lastrowid
+
+    def has_target_job(self, device_id: str, target_version: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM ota_jobs WHERE device_id=? AND target_version=? "
+            "AND state NOT IN ('failed','health_check_failed','confirm_failed') LIMIT 1",
+            (device_id, target_version),
+        ).fetchone()
+        return row is not None
 
     def next_queued_job(self) -> dict | None:
         cur = self._conn.execute(
@@ -140,10 +162,39 @@ class Inventory:
                 (state, result, now, job_id),
             )
         self._conn.commit()
+        self._changed()
+
+    def set_job_progress(self, job_id: int, progress: int, result: str | None = None) -> None:
+        self._conn.execute(
+            "UPDATE ota_jobs SET progress=?, result=COALESCE(?, result), updated_at=? WHERE id=?",
+            (max(0, min(100, progress)), result, time.time(), job_id),
+        )
+        self._conn.commit()
+        self._changed()
+
+    def list_jobs(self, limit: int = 100) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT j.id, j.device_id, d.name AS device_name, j.image_path, "
+            "j.target_version, j.state, j.progress, j.attempts, j.result, j.created_at, j.updated_at "
+            "FROM ota_jobs j LEFT JOIN devices d ON d.device_id=j.device_id "
+            "ORDER BY CASE WHEN j.state IN ('running','uploading','trial_pending','checking_health','confirming') "
+            "THEN 0 WHEN j.state='queued' THEN 1 ELSE 2 END, j.created_at LIMIT ?",
+            (limit,),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def recoverable_trial_jobs(self) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT id, device_id, image_path, target_version FROM ota_jobs "
+            "WHERE state IN ('trial_pending','checking_health','confirming') ORDER BY updated_at"
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def jobs_for_device(self, device_id: str) -> list[dict]:
         cur = self._conn.execute(
-            "SELECT id, image_path, target_version, state, attempts, result FROM ota_jobs "
+            "SELECT id, image_path, target_version, state, progress, attempts, result FROM ota_jobs "
             "WHERE device_id=? ORDER BY created_at",
             (device_id,),
         )

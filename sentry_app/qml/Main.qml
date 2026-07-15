@@ -12,6 +12,7 @@ Window {
     visibility: startFullscreen ? Window.FullScreen : Window.AutomaticVisibility
     color: "#050709"
     title: "Smart Sentry"
+    property bool updatePanelOpen: false
 
     // ---- connection-state styling (from design CONN_CONFIG) --------------
     readonly property var connCfg: ({
@@ -191,6 +192,41 @@ Window {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 16
+
+                    Rectangle {  // fleet device selector
+                        width: 250; height: 48; radius: 12
+                        color: "#0D7FD4FF"; border.width: 1; border.color: "#337FD4FF"
+                        Row {
+                            anchors.fill: parent; anchors.leftMargin: 10; anchors.rightMargin: 10
+                            Text { text: "‹"; color: "#7fd4ff"; font.pixelSize: 28; anchors.verticalCenter: parent.verticalCenter }
+                            MouseArea { width: 28; height: parent.height; onClicked: sentry.previousDevice() }
+                            Column {
+                                width: 164; anchors.verticalCenter: parent.verticalCenter
+                                Text { text: sentry.deviceName; width: parent.width; elide: Text.ElideRight; color: "#eaf6ff"; font.family: uiFont; font.pixelSize: 12; font.bold: true }
+                                Text { text: "SS1 " + sentry.devicePosition + "/" + sentry.deviceCount + " · FW " + sentry.fwVersion; color: "#5a6472"; font.family: monoFont; font.pixelSize: 10 }
+                            }
+                            MouseArea { width: 28; height: parent.height; onClicked: sentry.nextDevice() }
+                            Text { text: "›"; color: "#7fd4ff"; font.pixelSize: 28; anchors.verticalCenter: parent.verticalCenter }
+                        }
+                    }
+
+                    Rectangle {  // update status / queue button
+                        id: updateButton
+                        width: 170; height: 48; radius: 12
+                        color: "#147FD4FF"; border.width: 1
+                        border.color: sentry.updateStatus === "error" ? "#ff6b6b" : "#4D7FD4FF"
+                        Column {
+                            anchors.centerIn: parent; spacing: 2
+                            Text {
+                                anchors.horizontalCenter: parent.horizontalCenter
+                                text: sentry.updateStatus === "checking" ? "CHECKING…" :
+                                      sentry.updateStatus === "up_to_date" ? "FIRMWARE UP TO DATE" : "FIRMWARE / QUEUE"
+                                color: "#7fd4ff"; font.family: uiFont; font.pixelSize: 11; font.bold: true
+                            }
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: sentry.jobs.length + " job(s) · " + sentry.updateProgress + "%"; color: "#8b95a3"; font.family: monoFont; font.pixelSize: 9 }
+                        }
+                        MouseArea { anchors.fill: parent; onClicked: root.updatePanelOpen = true }
+                    }
 
                     Row {  // signal bars
                         anchors.verticalCenter: parent.verticalCenter
@@ -492,7 +528,7 @@ Window {
                         spacing: 32
                         Repeater {
                             model: [
-                                { k: "DEVICE", v: "SS1" },
+                                { k: "DEVICE", v: sentry.deviceId.length > 8 ? sentry.deviceId.slice(-8) : sentry.deviceId },
                                 { k: "LAST UPDATE", v: sentry.lastUpdate },
                                 { k: "UPTIME", v: sentry.uptime }
                             ]
@@ -579,6 +615,62 @@ Window {
                     color: "#eaf6ff"; font.family: uiFont
                     font.pixelSize: 20; font.bold: true; font.letterSpacing: 2.8
                 }
+            }
+        }
+
+        // ---------------- FIRMWARE / MULTI-DEVICE QUEUE ----------------
+        Rectangle {
+            anchors.fill: parent; color: "#CC05070A"
+            visible: root.updatePanelOpen; z: 20
+            MouseArea { anchors.fill: parent; onClicked: root.updatePanelOpen = false }
+            Rectangle {
+                anchors.centerIn: parent; width: 820; height: 540; radius: 20
+                color: "#F20A0E14"; border.width: 1; border.color: "#4D7FD4FF"
+                MouseArea { anchors.fill: parent }
+                Column {
+                    anchors.fill: parent; anchors.margins: 28; spacing: 16
+                    Row {
+                        width: parent.width
+                        Column {
+                            width: parent.width - 160
+                            Text { text: "FIRMWARE UPDATE QUEUE"; color: "#eaf6ff"; font.family: uiFont; font.pixelSize: 22; font.bold: true; font.letterSpacing: 1.2 }
+                            Text { text: sentry.updateMessage; color: "#8b95a3"; font.family: uiFont; font.pixelSize: 13 }
+                        }
+                        Rectangle {
+                            width: 150; height: 44; radius: 10; color: "#197FD4FF"; border.width: 1; border.color: "#597FD4FF"
+                            Text { anchors.centerIn: parent; text: sentry.updateStatus === "checking" ? "CHECKING…" : "CHECK NOW"; color: "#7fd4ff"; font.bold: true; font.pixelSize: 12 }
+                            MouseArea { anchors.fill: parent; enabled: sentry.updateStatus !== "checking"; onClicked: sentry.checkUpdates() }
+                        }
+                    }
+                    Rectangle { width: parent.width; height: 1; color: "#267FD4FF" }
+                    Text { text: "LATEST LOCAL RELEASE  " + (sentry.latestVersion || "NONE") + "    ·    UPDATES RUN ONE SS1 AT A TIME"; color: "#7fd4ff"; font.family: monoFont; font.pixelSize: 12 }
+                    Item {
+                        width: parent.width; height: 340
+                        Text { anchors.centerIn: parent; visible: sentry.jobs.length === 0; text: "No firmware jobs yet"; color: "#5a6472"; font.pixelSize: 16 }
+                        Column {
+                            width: parent.width; spacing: 8
+                            Repeater {
+                                model: sentry.jobs.slice(0, 6)
+                                Rectangle {
+                                    width: parent.width; height: 48; radius: 8; color: "#0DFFFFFF"; border.width: 1; border.color: "#267FD4FF"
+                                    Row {
+                                        anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 14
+                                        Text { width: 180; anchors.verticalCenter: parent.verticalCenter; text: (modelData.device_name || modelData.device_id); elide: Text.ElideRight; color: "#eaf6ff"; font.family: monoFont; font.pixelSize: 12 }
+                                        Text { width: 80; anchors.verticalCenter: parent.verticalCenter; text: "→ " + (modelData.target_version || "?"); color: "#7fd4ff"; font.family: monoFont; font.pixelSize: 12 }
+                                        Text { width: 155; anchors.verticalCenter: parent.verticalCenter; text: String(modelData.state).replace("_", " ").toUpperCase(); color: modelData.state === "failed" ? "#ff6b6b" : "#5eead4"; font.pixelSize: 11; font.bold: true }
+                                        Rectangle {
+                                            width: 220; height: 8; radius: 4; anchors.verticalCenter: parent.verticalCenter; color: "#1AFFFFFF"
+                                            Rectangle { width: parent.width * (modelData.progress || 0) / 100; height: parent.height; radius: 4; color: "#4aa8ff" }
+                                        }
+                                        Text { width: 40; anchors.verticalCenter: parent.verticalCenter; text: (modelData.progress || 0) + "%"; color: "#8b95a3"; font.family: monoFont; font.pixelSize: 11 }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text { text: "Trial images are confirmed only after the Pi sees 15 seconds of authenticated sensor data. Failed trials reboot into MCUboot rollback."; wrapMode: Text.WordWrap; width: parent.width; color: "#5a6472"; font.pixelSize: 11 }
+                }
+                Text { anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 14; text: "×"; color: "#8b95a3"; font.pixelSize: 28; MouseArea { anchors.fill: parent; anchors.margins: -12; onClicked: root.updatePanelOpen = false } }
             }
         }
     }

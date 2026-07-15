@@ -8,23 +8,12 @@ this package exists to remove.
 """
 import asyncio
 import struct
-import sys
-from pathlib import Path
-
 from bleak import BleakClient
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from creds import CLIENT_CERT, CLIENT_KEY_PEM, CERT_LEN, NONCE_LEN, SIG_LEN  # noqa: E402
-
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-
-AUTH_CHALLENGE_UUID = "7e8f00a1-1111-2222-3333-123456789abc"
-AUTH_RESPONSE_UUID = "7e8f00a2-1111-2222-3333-123456789abc"
+from auth import authenticate
 TEMP_UUID = "00002a6e-0000-1000-8000-00805f9b34fb"
 HUM_UUID = "00002a6f-0000-1000-8000-00805f9b34fb"
 LED_UUID = "7e8f0002-1111-2222-3333-123456789abc"
+FW_VERSION_UUID = "00002a26-0000-1000-8000-00805f9b34fb"
 
 RETRY_DELAY_S = 2.0
 MAX_RETRY_DELAY_S = 20.0
@@ -34,14 +23,6 @@ MAX_RETRY_DELAY_S = 20.0
 # connect attempt every 2s indefinitely - visible as connect/disconnect
 # churn on its own serial log (observed 2026-07-15 during a firmware
 # downgrade).
-
-
-def _sign_nonce(nonce: bytes) -> bytes:
-    """ECDSA P-256/SHA-256, RAW r||s (64 B) - SS1 rejects DER."""
-    key = serialization.load_pem_private_key(CLIENT_KEY_PEM, password=None)
-    der = key.sign(nonce, ec.ECDSA(hashes.SHA256()))
-    r, s = decode_dss_signature(der)
-    return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
 
 class DeviceSession:
@@ -107,18 +88,11 @@ class DeviceSession:
             await client.connect()
         try:
             self.client = client
-            try:
-                await client.pair()
-            except Exception as e:
-                print(f"[{self.name}] pair() note: {e} - continuing")
-
             self._post("conn_state", "authenticating")
-            nonce = bytes(await client.read_gatt_char(AUTH_CHALLENGE_UUID))
-            if len(nonce) != NONCE_LEN:
-                raise ValueError(f"unexpected nonce length {len(nonce)}")
-            response = CLIENT_CERT + _sign_nonce(nonce)
-            assert len(response) == CERT_LEN + SIG_LEN
-            await client.write_gatt_char(AUTH_RESPONSE_UUID, response, response=True)
+            await authenticate(client)
+
+            fw_version = bytes(await client.read_gatt_char(FW_VERSION_UUID)).decode("ascii")
+            self._post("fw_version", fw_version)
 
             self._post("conn_state", "secure")
             self._post("reconnecting", False)

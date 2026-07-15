@@ -19,6 +19,8 @@ class AgentDriver:
         self.backend = backend
         self.loop = None  # set by main.py (unused here - no separate thread needed)
         self.device_id = None
+        self.devices = {}
+        self.order = []
         self._writer = None
 
     async def run(self):
@@ -57,16 +59,40 @@ class AgentDriver:
         mtype = msg.get("type")
         if mtype == "snapshot":
             devices = msg.get("devices", [])
-            if devices and self.device_id is None:
-                self.device_id = devices[0]["device_id"]
-            for d in devices:
-                if d["device_id"] == self.device_id:
-                    self._apply(d)
+            self.devices = {d["device_id"]: d for d in devices}
+            self.order = [d["device_id"] for d in devices]
+            if self.device_id not in self.devices:
+                self.device_id = self.order[0] if self.order else None
+            self._apply_selected()
+            self.backend.set_jobs(msg.get("jobs", []))
+            updates = msg.get("updates", {})
+            self.backend.set_update_status(updates.get("status"), updates.get("message"), updates.get("latest_version"))
         elif mtype == "state":
             if self.device_id is None:
                 self.device_id = msg["device_id"]
+            self.devices.setdefault(msg["device_id"], {"device_id": msg["device_id"], "name": msg["device_id"]})
+            if msg["device_id"] not in self.order:
+                self.order.append(msg["device_id"])
+            self.devices[msg["device_id"]][msg["key"]] = msg["value"]
             if msg["device_id"] == self.device_id:
                 self._apply({msg["key"]: msg["value"]})
+                self._publish_device()
+        elif mtype == "jobs":
+            self.backend.set_jobs(msg.get("jobs", []))
+        elif mtype == "update_status":
+            self.backend.set_update_status(msg.get("status"), msg.get("message"), msg.get("latest_version"))
+
+    def _apply_selected(self):
+        if self.device_id and self.device_id in self.devices:
+            self._apply(self.devices[self.device_id])
+        self._publish_device()
+
+    def _publish_device(self):
+        d = self.devices.get(self.device_id, {})
+        pos = self.order.index(self.device_id) + 1 if self.device_id in self.order else 0
+        self.backend.set_device(
+            self.device_id or "", d.get("name", "No SS1 discovered"), pos, len(self.order), d.get("fw_version", "unknown")
+        )
 
     def _apply(self, fields: dict):
         for key, value in fields.items():
@@ -86,8 +112,28 @@ class AgentDriver:
     def reconnect(self):
         self._send_cmd("reconnect")
 
-    def _send_cmd(self, cmd: str):
-        if self._writer is None or self.device_id is None:
+    def next_device(self):
+        self._move_device(1)
+
+    def previous_device(self):
+        self._move_device(-1)
+
+    def _move_device(self, delta):
+        if not self.order:
             return
-        line = json.dumps({"cmd": cmd, "device_id": self.device_id}) + "\n"
+        index = self.order.index(self.device_id) if self.device_id in self.order else 0
+        self.device_id = self.order[(index + delta) % len(self.order)]
+        self._apply_selected()
+
+    def check_updates(self):
+        self.backend.set_update_status("checking", "Checking local signed firmware releases…")
+        self._send_cmd("check_updates", include_device=False)
+
+    def _send_cmd(self, cmd: str, include_device=True):
+        if self._writer is None or (include_device and self.device_id is None):
+            return
+        payload = {"cmd": cmd}
+        if include_device:
+            payload["device_id"] = self.device_id
+        line = json.dumps(payload) + "\n"
         self._writer.write(line.encode())

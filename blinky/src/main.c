@@ -18,6 +18,7 @@
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/hwinfo.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
@@ -55,8 +56,11 @@ static bool sht3x_ready;
 
 /* ---------------- Device name ---------------- */
 
-#define DEVICE_NAME     CONFIG_BT_DEVICE_NAME
-#define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
+#define DEVICE_NAME_PREFIX CONFIG_BT_DEVICE_NAME "-"
+#define DEVICE_ID_BYTES 8
+#define DEVICE_ID_HEX_LEN (DEVICE_ID_BYTES * 2)
+
+static char device_name[sizeof(DEVICE_NAME_PREFIX) + DEVICE_ID_HEX_LEN];
 
 /* ---------------- GPIO aliases ---------------- */
 
@@ -152,6 +156,26 @@ static void notify_led_state(void);
 static void set_led_state(uint8_t state, bool send_notify);
 
 static void advertising_start(void);
+
+static int init_permanent_device_name(void)
+{
+	uint8_t id[DEVICE_ID_BYTES];
+	ssize_t id_len = hwinfo_get_device_id(id, sizeof(id));
+	int pos;
+
+	if (id_len < 0) {
+		return (int)id_len;
+	}
+	if (id_len < DEVICE_ID_BYTES) {
+		return -ENODATA;
+	}
+
+	pos = snprintf(device_name, sizeof(device_name), "%s", DEVICE_NAME_PREFIX);
+	for (int i = 0; i < DEVICE_ID_BYTES; i++) {
+		pos += snprintf(&device_name[pos], sizeof(device_name) - pos, "%02X", id[i]);
+	}
+	return 0;
+}
 
 /* ---------------- Connection tracking helpers ---------------- */
 
@@ -423,6 +447,34 @@ static void led_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	       value == BT_GATT_CCC_NOTIFY ? "enabled" : "disabled");
 }
 
+static ssize_t read_firmware_revision_cb(struct bt_conn *conn,
+					 const struct bt_gatt_attr *attr,
+					 void *buf, uint16_t len, uint16_t offset)
+{
+	if (!sentry_auth_is_authenticated(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset,
+				 APP_VERSION_STRING, strlen(APP_VERSION_STRING));
+}
+
+static bool sentry_write_authorize(struct bt_conn *conn,
+				   const struct bt_gatt_attr *attr)
+{
+	/* CCC and all application characteristics keep their own permissions.
+	 * The SMP request characteristic is the only stock Zephyr endpoint whose
+	 * write callback otherwise has no application authentication hook. */
+	if (bt_uuid_cmp(attr->uuid, SMP_BT_CHR_UUID) == 0) {
+		return sentry_auth_is_authenticated(conn);
+	}
+	return true;
+}
+
+static const struct bt_gatt_authorization_cb sentry_authorization = {
+	.write_authorize = sentry_write_authorize,
+};
+
 /* ---------------- GATT services ---------------- */
 
 BT_GATT_SERVICE_DEFINE(ess_svc,
@@ -463,6 +515,14 @@ BT_GATT_SERVICE_DEFINE(sentry_svc,
 	BT_GATT_CUD("LED Control / Maintenance State", BT_GATT_PERM_READ),
 );
 
+BT_GATT_SERVICE_DEFINE(device_info_svc,
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_DIS),
+	BT_GATT_CHARACTERISTIC(BT_UUID_DIS_FIRMWARE_REVISION,
+			       BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ_ENCRYPT,
+			       read_firmware_revision_cb, NULL, NULL),
+);
+
 /* ---------------- Advertising ---------------- */
 
 static const struct bt_le_adv_param *adv_param =
@@ -478,8 +538,8 @@ static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_UUID128_ALL, SMP_BT_SVC_UUID_VAL),
 };
 
-static const struct bt_data sd[] = {
-	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+static struct bt_data sd[] = {
+	BT_DATA(BT_DATA_NAME_COMPLETE, device_name, 0),
 };
 
 static void adv_work_handler(struct k_work *work)
@@ -526,7 +586,7 @@ static void advertising_start(void)
 	}
 
 	printk("Advertising started: %s, connection slots available: %u/%d\n",
-	       DEVICE_NAME,
+	       device_name,
 	       CONFIG_BT_MAX_CONN - active_conn_count,
 	       CONFIG_BT_MAX_CONN);
 }
@@ -1034,28 +1094,6 @@ static void sht3x_init_check(void)
 
 /* ---------------- main ---------------- */
 
-static void confirm_running_image(void)
-{
-	int ret;
-
-	if (boot_is_img_confirmed()) {
-		printk("OTA image already confirmed\n");
-		return;
-	}
-
-	/*
-	 * Reaching here means the core SS1 hardware, Bluetooth stack, settings and
-	 * advertising have initialized. Confirm the trial image so MCUboot keeps it.
-	 */
-	ret = boot_write_img_confirmed();
-	if (ret) {
-		printk("OTA image confirmation failed: %d\n", ret);
-	} else {
-		printk("OTA image confirmed; firmware %s is now permanent\n",
-		       APP_VERSION_STRING);
-	}
-}
-
 int main(void)
 {
 	int ret;
@@ -1065,7 +1103,14 @@ int main(void)
 	int64_t last_maint_button_ms = 0;
 
 	printk("\n\nMAIN STARTED - SS1 firmware %s\n", APP_VERSION_STRING);
-	printk("OTA validation marker: BLE update 1.0.4 is running\n");
+	printk("OTA validation marker: secure fleet update 1.0.5 is running\n");
+
+	ret = init_permanent_device_name();
+	if (ret) {
+		printk("Permanent device ID unavailable: %d\n", ret);
+		return ret;
+	}
+	sd[0].data_len = strlen(device_name);
 
 	ret = gpio_init_all();
 	if (ret < 0) {
@@ -1113,10 +1158,17 @@ int main(void)
 		}
 	}
 
+	ret = bt_gatt_authorization_cb_register(&sentry_authorization);
+	if (ret) {
+		printk("GATT authorization registration failed: %d\n", ret);
+		return ret;
+	}
+
 	aux_uart_load_identity();
 
 	advertising_start();
-	confirm_running_image();
+	printk("OTA image state: %s; awaiting Pi health confirmation when pending\n",
+	       boot_is_img_confirmed() ? "confirmed" : "trial/unconfirmed");
 
 	last_sample_ms = k_uptime_get();
 	last_notify_ms = k_uptime_get();

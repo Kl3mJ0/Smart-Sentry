@@ -21,6 +21,7 @@ from fleet import FleetManager
 from inventory import Inventory
 from ipc import IpcServer
 from ota import OtaClient, OtaError, OtaSameImageError
+from releases import LocalReleaseService
 
 OTA_POLL_INTERVAL_S = 5.0
 # The upload itself (not mark_test/reset) has been observed to disconnect
@@ -46,7 +47,7 @@ HEALTH_CHECK_STABLE_S = 15.0
 HEALTH_CHECK_POLL_S = 1.0
 
 
-async def _run_ota_job(job: dict, address: str) -> None:
+async def _run_ota_job(job: dict, address: str, inventory: Inventory) -> None:
     """Upload + trial-boot, retrying the whole sequence on transient failure.
     Never confirms the image - the caller runs a health check first and
     only then calls _confirm_trial_image().
@@ -59,8 +60,21 @@ async def _run_ota_job(job: dict, address: str) -> None:
     last_error: Exception | None = None
     for attempt in range(1, MAX_OTA_ATTEMPTS + 1):
         try:
+            last_progress = -1
+
+            def report_progress(offset, total):
+                nonlocal last_progress
+                progress = int(offset * 100 / max(total, 1))
+                if progress != last_progress:
+                    last_progress = progress
+                    inventory.set_job_progress(
+                        job["id"], progress, f"Uploading {offset}/{total} bytes"
+                    )
+
             async with OtaClient(address) as ota:
-                await ota.upload(job["image_path"])
+                inventory.set_job_state(job["id"], "uploading", result="Uploading signed image")
+                await ota.upload(job["image_path"], report_progress)
+                inventory.set_job_progress(job["id"], 100, "Upload complete; scheduling trial boot")
                 images = await ota.list_images()
                 pending = next((img for img in images if not img.active), None)
                 if pending is None:
@@ -163,11 +177,43 @@ async def confirm_device_now(fleet: FleetManager, device_id: str) -> str:
     return await _confirm_active_image(fleet, address, device_id)
 
 
+async def _force_trial_rollback(fleet: FleetManager, device_id: str) -> str:
+    """Reboot an unconfirmed trial image. MCUboot then restores the previous
+    confirmed slot. If the broken image cannot authenticate, rollback remains
+    guaranteed at the next physical/watchdog reboot because it was never
+    confirmed; report that distinction accurately."""
+    session = fleet.sessions.get(device_id)
+    if not session:
+        return "rollback armed; device is offline and will revert on next reboot"
+    paused = await fleet.pause_for_ota(device_id)
+    try:
+        async with fleet.discovery_lock:
+            async with OtaClient(session.address) as ota:
+                await ota.reset()
+        return "rollback reboot requested; MCUboot will restore previous confirmed image"
+    except Exception as exc:
+        return f"rollback armed for next reboot (remote reset unavailable: {exc})"
+    finally:
+        if paused:
+            fleet.resume_after_ota(device_id)
+
+
 async def ota_worker(fleet: FleetManager, inventory: Inventory):
     """Drains the OTA queue sequentially (this Pi has one adapter, so
     sequential-per-adapter and sequential-globally are the same thing for
     now)."""
+    recovered_trials = False
     while True:
+        if not recovered_trials:
+            recovered_trials = True
+            for trial in inventory.recoverable_trial_jobs():
+                inventory.set_job_state(trial["id"], "checking_health", result="Agent restarted; recovering trial")
+                try:
+                    result = await confirm_device_now(fleet, trial["device_id"])
+                    inventory.set_job_state(trial["id"], "confirmed", result=result)
+                except Exception as exc:
+                    rollback = await _force_trial_rollback(fleet, trial["device_id"])
+                    inventory.set_job_state(trial["id"], "health_check_failed", result=f"{exc}; {rollback}")
         job = inventory.next_queued_job()
         if job is None:
             await asyncio.sleep(OTA_POLL_INTERVAL_S)
@@ -183,7 +229,7 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
             # allows only one discovery session adapter-wide, and OtaClient's
             # connect-by-address does its own scan internally.
             async with fleet.discovery_lock:
-                await _run_ota_job(job, address)
+                await _run_ota_job(job, address, inventory)
         except OtaSameImageError as e:
             inventory.set_job_state(job["id"], "same_image", result=str(e))
             print(f"[ota] job {job['id']} skipped: {e}")
@@ -201,7 +247,7 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
         # normal sensor session reconnect on its own - that's the health
         # check itself (proves BLE/cert-auth work post-flash) - before
         # deciding whether to confirm.
-        inventory.set_job_state(job["id"], "trial_pending", result="uploaded + reset, running health check")
+        inventory.set_job_state(job["id"], "checking_health", result="Trial boot started; Pi health check in progress")
         if paused:
             fleet.resume_after_ota(device_id)
 
@@ -210,17 +256,9 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
             inventory.set_job_state(job["id"], "confirmed", result=result)
             print(f"[ota] job {job['id']} confirmed: {result}")
         except HealthCheckFailed as e:
-            inventory.set_job_state(
-                job["id"], "health_check_failed",
-                result=(
-                    f"{e} - manual intervention required; current SS1 firmware "
-                    "may already have auto-confirmed the trial image"
-                ),
-            )
-            print(
-                f"[ota] job {job['id']} health check failed - current SS1 "
-                "firmware may already have auto-confirmed"
-            )
+            rollback = await _force_trial_rollback(fleet, device_id)
+            inventory.set_job_state(job["id"], "health_check_failed", result=f"{e}; {rollback}")
+            print(f"[ota] job {job['id']} health check failed: {rollback}")
         except Exception as e:
             inventory.set_job_state(job["id"], "confirm_failed", result=str(e))
             print(f"[ota] job {job['id']} confirm failed: {e!r}")
@@ -229,13 +267,19 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
 async def main():
     inventory = Inventory()
     fleet = FleetManager(inventory)
-    ipc = IpcServer(fleet, inventory, confirm_fn=lambda device_id: confirm_device_now(fleet, device_id))
+    releases = LocalReleaseService(fleet, inventory)
+    ipc = IpcServer(
+        fleet, inventory,
+        confirm_fn=lambda device_id: confirm_device_now(fleet, device_id),
+        releases=releases,
+    )
 
     server = await ipc.start()
     async with server:
         await asyncio.gather(
             fleet.run(),
             ota_worker(fleet, inventory),
+            releases.run(),
             server.serve_forever(),
         )
 

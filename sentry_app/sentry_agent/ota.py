@@ -13,7 +13,10 @@ This module never runs on its own; FleetManager.pause_for_ota() must park
 the device's regular DeviceSession first (SS1 only accepts one GATT
 connection at a time).
 """
+import asyncio
 from pathlib import Path
+
+from bleak import BleakClient, BleakScanner
 
 from smp.header import GroupId
 from smp.image_management import IMG_MGMT_ERR
@@ -21,7 +24,15 @@ from smpclient import SMPClient
 from smpclient.generics import error, error_v2, success
 from smpclient.requests.image_management import ImageStatesRead, ImageStatesWrite
 from smpclient.requests.os_management import EchoWrite, ResetWrite
-from smpclient.transport.ble import SMPBLETransport
+from smpclient.transport.ble import (
+    MAC_ADDRESS_PATTERN,
+    SMP_CHARACTERISTIC_UUID,
+    UUID_PATTERN,
+    SMPBLETransport,
+    SMPBLETransportDeviceNotFound,
+    SMPBLETransportNotSMPServer,
+)
+from auth import authenticate
 
 CONNECT_TIMEOUT_S = 15.0
 REQUEST_TIMEOUT_S = 10.0
@@ -40,10 +51,65 @@ class OtaSameImageError(OtaError):
     2026-07-14 re-uploading a device already running the target version."""
 
 
+class AuthenticatedSMPBLETransport(SMPBLETransport):
+    """Runs SS1 certificate auth on the exact connection used by SMP.
+
+    SS1's GATT authorization callback rejects SMP writes from every other
+    connection, so authenticating a separate BleakClient would not work.
+    smpclient intentionally owns `_client`; this narrow subclass performs
+    the handshake after its normal connect/MTU/notify setup.
+    """
+
+    async def connect(self, address: str, timeout_s: float) -> None:
+        # smpclient normally passes services=(SMP_SERVICE_UUID,) to BleakClient
+        # as a discovery optimisation. SS1 must also discover its auth service
+        # on this same connection, so reproduce the transport setup without
+        # that filter.
+        device = (
+            await BleakScanner.find_device_by_address(address, timeout=timeout_s)
+            if MAC_ADDRESS_PATTERN.match(address) or UUID_PATTERN.match(address)
+            else await BleakScanner.find_device_by_name(address, timeout=timeout_s)
+        )
+        if device is None:
+            raise SMPBLETransportDeviceNotFound(f"Device {address!r} not found")
+
+        self._client = BleakClient(
+            device,
+            winrt=self._winrt,
+            disconnected_callback=self._set_disconnected_event,
+        )
+        await self._client.connect()
+        self._disconnected_event.clear()
+
+        smp_characteristic = self._client.services.get_characteristic(SMP_CHARACTERISTIC_UUID)
+        if smp_characteristic is None:
+            await self._client.disconnect()
+            raise SMPBLETransportNotSMPServer("Missing the SMP characteristic UUID")
+
+        self._max_write_without_response_size = smp_characteristic.max_write_without_response_size
+        if self._bluez_backend(self._client._backend):
+            await self._client._backend._acquire_mtu()
+            self._max_write_without_response_size = self._client.mtu_size - 3
+        elif self._winrt_backend(self._client._backend) and self._max_write_without_response_size == 20:
+            await asyncio.sleep(2)
+            smp_characteristic._max_write_without_response_size = (
+                self._client._backend._session.max_pdu_size - 3
+            )
+            self._max_write_without_response_size = smp_characteristic.max_write_without_response_size
+
+        self._smp_characteristic = smp_characteristic
+        await self._client.start_notify(SMP_CHARACTERISTIC_UUID, self._notify_callback)
+        try:
+            await authenticate(self._client)
+        except Exception:
+            await super().disconnect()
+            raise
+
+
 class OtaClient:
     def __init__(self, address: str):
         self.address = address
-        self._client = SMPClient(SMPBLETransport(), address, timeout_s=REQUEST_TIMEOUT_S)
+        self._client = SMPClient(AuthenticatedSMPBLETransport(), address, timeout_s=REQUEST_TIMEOUT_S)
 
     async def __aenter__(self):
         await self._client.connect(connect_timeout_s=CONNECT_TIMEOUT_S)

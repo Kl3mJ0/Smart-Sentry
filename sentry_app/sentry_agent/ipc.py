@@ -24,12 +24,16 @@ SOCK_PATH = Path("/tmp/sentry_agent.sock")
 
 
 class IpcServer:
-    def __init__(self, fleet, inventory, confirm_fn=None):
+    def __init__(self, fleet, inventory, confirm_fn=None, releases=None):
         self.fleet = fleet
         self.inventory = inventory
         self.confirm_fn = confirm_fn  # async (device_id) -> str, see agent_main.confirm_device_now
+        self.releases = releases
         self._clients: set[asyncio.StreamWriter] = set()
         fleet.add_state_listener(self._broadcast_state)
+        inventory.add_listener(self._broadcast_jobs)
+        if releases:
+            releases.add_listener(self._broadcast_update_status)
 
     async def start(self):
         if SOCK_PATH.exists():
@@ -43,6 +47,25 @@ class IpcServer:
         for writer in list(self._clients):
             self._send(writer, line)
 
+    def _broadcast_jobs(self):
+        self._broadcast({"type": "jobs", "jobs": self.inventory.list_jobs()})
+
+    def _broadcast_update_status(self, status):
+        self._broadcast({"type": "update_status", **status})
+
+    def _broadcast(self, payload):
+        line = json.dumps(payload) + "\n"
+        for writer in list(self._clients):
+            self._send(writer, line)
+
+    def _snapshot(self):
+        return {
+            "type": "snapshot",
+            "devices": self.fleet.list_devices(),
+            "jobs": self.inventory.list_jobs(),
+            "updates": self.releases.snapshot() if self.releases else {},
+        }
+
     def _send(self, writer, line: str):
         try:
             writer.write(line.encode())
@@ -52,7 +75,7 @@ class IpcServer:
     async def _handle_client(self, reader, writer):
         self._clients.add(writer)
         try:
-            self._send(writer, json.dumps({"type": "snapshot", "devices": self.fleet.list_devices()}) + "\n")
+            self._send(writer, json.dumps(self._snapshot()) + "\n")
             await writer.drain()
             while True:
                 line = await reader.readline()
@@ -76,7 +99,7 @@ class IpcServer:
         ok, err, extra = True, None, {}
         try:
             if cmd == "list_devices":
-                self._send(writer, json.dumps({"type": "snapshot", "devices": self.fleet.list_devices()}) + "\n")
+                self._send(writer, json.dumps(self._snapshot()) + "\n")
                 await writer.drain()
                 return
             elif cmd == "toggle_led":
@@ -88,6 +111,11 @@ class IpcServer:
                     msg["device_id"], msg["image_path"], msg.get("target_version")
                 )
                 extra["job_id"] = job_id
+            elif cmd == "check_updates":
+                if self.releases is None:
+                    ok, err = False, "release service not wired up"
+                else:
+                    extra["queued"] = await self.releases.check_now()
             elif cmd == "confirm_device":
                 if self.confirm_fn is None:
                     ok, err = False, "confirm not wired up"
