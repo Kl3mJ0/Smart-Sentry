@@ -1,0 +1,20 @@
+{
+  "format-version": 1,
+  "name": "blinky",
+  "channel": "local-acceptance",
+  "sha256": "979300dddc510972b7a0e96518da53694b55ec49409e9e54e7037833c2f727fd",
+  "mcuboot_image_digest": "a265d52bd61862a81d1977b77a19fcfc5ad40f2958dd2b55d84927c3bdc907cb",
+  "files": [
+    {
+      "type": "application",
+      "board": "nrf54l15dk",
+      "soc": "nrf54l15",
+      "image_index": "0",
+      "slot_index_primary": "1",
+      "slot_index_secondary": "2",
+      "version_MCUBOOT": "1.0.6+0",
+      "size": 261066,
+      "file": "blinky.signed.bin"
+    }
+  ]
+}

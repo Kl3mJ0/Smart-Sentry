@@ -1103,7 +1103,7 @@ int main(void)
 	int64_t last_maint_button_ms = 0;
 
 	printk("\n\nMAIN STARTED - SS1 firmware %s\n", APP_VERSION_STRING);
-	printk("OTA validation marker: secure fleet update 1.0.5 is running\n");
+	printk("OTA validation marker: automated fleet update 1.0.6 is running\n");
 
 	ret = init_permanent_device_name();
 	if (ret) {
