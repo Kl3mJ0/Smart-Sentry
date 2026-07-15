@@ -11,9 +11,9 @@ Nothing here auto-executes an OTA: enqueue_ota jobs sit in the queue until
 something (an operator via the IPC socket, or the cloud poller once it
 exists) puts one there. The queue worker below only *drains* jobs that are
 already queued, one at a time - but once it does, it drives the full
-upload -> trial-boot -> health-check -> confirm/revert cycle itself; SS1
-no longer decides on its own when a trial image is good (see
-_wait_for_healthy/_confirm_trial_image).
+upload -> trial-boot -> health-check -> confirm cycle itself. Current SS1
+firmware still auto-confirms during startup, so the health gate becomes
+authoritative only after that firmware behaviour is removed and tested.
 """
 import asyncio
 
@@ -34,14 +34,13 @@ OTA_POLL_INTERVAL_S = 5.0
 MAX_OTA_ATTEMPTS = 5
 OTA_RETRY_DELAY_S = 3.0
 
-# Health check after a trial-boot: the device must reconnect on its own
+# Intended production health check after a trial-boot: the device must reconnect on its own
 # (proves BLE/cert-auth still work post-flash) and keep streaming fresh
 # temp+humidity for HEALTH_CHECK_STABLE_S straight, within
-# HEALTH_CHECK_TIMEOUT_S of the reset. This - not SS1 itself - is what
-# decides whether the image gets confirmed. If it doesn't pass, we
-# deliberately leave the image unconfirmed: MCUboot reverts to the previous
-# image on the next power cycle on its own, which is the safety net we want
-# to keep, not route around.
+# HEALTH_CHECK_TIMEOUT_S of the reset. The agent confirms only after this
+# passes. Current SS1 firmware still auto-confirms at startup, so the agent
+# cannot yet guarantee that a failure remains unconfirmed or rolls back; see
+# docs/ota-auth-and-device-id.md.
 HEALTH_CHECK_TIMEOUT_S = 90.0
 HEALTH_CHECK_STABLE_S = 15.0
 HEALTH_CHECK_POLL_S = 1.0
@@ -213,9 +212,15 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
         except HealthCheckFailed as e:
             inventory.set_job_state(
                 job["id"], "health_check_failed",
-                result=f"{e} - left unconfirmed, MCUboot will revert on next power cycle",
+                result=(
+                    f"{e} - manual intervention required; current SS1 firmware "
+                    "may already have auto-confirmed the trial image"
+                ),
             )
-            print(f"[ota] job {job['id']} health check failed - leaving unconfirmed")
+            print(
+                f"[ota] job {job['id']} health check failed - current SS1 "
+                "firmware may already have auto-confirmed"
+            )
         except Exception as e:
             inventory.set_job_state(job["id"], "confirm_failed", result=str(e))
             print(f"[ota] job {job['id']} confirm failed: {e!r}")

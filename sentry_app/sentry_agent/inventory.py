@@ -1,11 +1,8 @@
 """Persistent SQLite inventory of SS1 devices + the OTA job queue.
 
-device_id today is just the BLE address (see resolve_device_id) - SS1
-firmware doesn't yet expose a stable identifier (every unit currently
-advertises as "Joseph_BLE" and its BLE address is a *random* address type,
-not guaranteed stable across power cycles/re-pairing). This is a provisional
-key; swap resolve_device_id once firmware adds a real immutable ID
-characteristic. See project memory for the full fleet-blocker list.
+Current firmware advertises only "Joseph_BLE", so device_id falls back to
+the BLE address. Future firmware can advertise "Joseph_BLE-<ID>" and
+resolve_device_id() will use that stable suffix without changing callers.
 """
 import sqlite3
 import time
@@ -39,9 +36,26 @@ CREATE TABLE IF NOT EXISTS ota_jobs (
 """
 
 
+NAME_ID_PREFIX = "Joseph_BLE-"  # must stay in sync with fleet.TARGET_NAME_PREFIX + "-"
+
+
 def resolve_device_id(address: str, name: str) -> str:
-    """Provisional device_id. TODO(firmware): key on a real immutable ID once
-    SS1 advertises one; today the BLE address is the only handle available."""
+    """Stable per-device key.
+
+    Pi side of the device-identity plan (docs/ota-auth-and-device-id.md):
+    once firmware advertises "Joseph_BLE-<ID>" (the full factory ID read via
+    Zephyr's hwinfo API), that suffix is the device_id - stable across reflash,
+    power cycles and address rotation. Until then, fall back to the BLE
+    address (random-static: stable across reboots in practice, but NOT
+    guaranteed across re-provisioning).
+
+    Migration note: when firmware starts advertising IDs, previously seen
+    devices get a fresh inventory row keyed by the new ID; the old
+    address-keyed row simply goes stale (harmless - no jobs reference it
+    once it stops being scheduled against).
+    """
+    if name.startswith(NAME_ID_PREFIX) and len(name) > len(NAME_ID_PREFIX):
+        return name[len(NAME_ID_PREFIX):]
     return address
 
 

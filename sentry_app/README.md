@@ -119,9 +119,23 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sentry-agent
 ```
 
+When `sentry-agent` is enabled, the dashboard must use the agent rather than
+opening BLE itself. Change the dashboard service's `ExecStart` to:
+
+```ini
+ExecStart=/usr/bin/python3 %h/sentry_app/main.py --driver agent --fullscreen
+```
+
+Then run `systemctl --user daemon-reload && systemctl --user restart
+sentry-dashboard`. Do not run `--driver ble` at the same time as
+`sentry-agent`; the agent is the sole owner of the Pi's Bluetooth adapter.
+
 Still open (see project OTA roadmap): immutable per-device IDs (today's
 `device_id` is just the BLE address - see `sentry_agent/inventory.py`),
 Pi-controlled image confirmation instead of SS1 confirming its own trial
 image, replacing the dev signing key, downgrade protection, and locking
 down the MCUmgr BLE endpoint. `sentry_agent/ota.py` uploads and trial-boots
 an image but deliberately never confirms one automatically.
+
+Detailed security and device-identity roadmap:
+[`../docs/ota-auth-and-device-id.md`](../docs/ota-auth-and-device-id.md).
