@@ -2,8 +2,8 @@
   "format-version": 1,
   "name": "blinky",
   "channel": "local-acceptance",
-  "sha256": "e7df27d2b80dad36fbc20e32c073d7caad0796f39cd60f2972d0e5af43c6168d",
-  "mcuboot_image_digest": "1d83cb033de135fcd56d819e97b68e521b1b1336a69f510329314b0ef8b584f1",
+  "sha256": "b3f2a53f80d9bfce1d06e13638450389ba75b0aefdfb059277120a8a5ab69654",
+  "mcuboot_image_digest": "28580b948f6618b83fe960fc96f28423aeae5e7c67489b41930441393fce7a38",
   "files": [
     {
       "type": "application",

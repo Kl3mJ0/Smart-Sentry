@@ -17,5 +17,5 @@ also replaces MCUboot; do not try to send the bootstrap HEX through MCUmgr.
 
 SHA-256:
 
-- OTA BIN: `e7df27d2b80dad36fbc20e32c073d7caad0796f39cd60f2972d0e5af43c6168d`
-- bootstrap HEX: `917c86a6ac1641a80879ee03897718eb8466a5f782ec96ca28d218d00ff8fc80`
+- OTA BIN: `b3f2a53f80d9bfce1d06e13638450389ba75b0aefdfb059277120a8a5ab69654`
+- bootstrap HEX: `09507f7490f9bc455bae5e1ef4b8c691c93e7d7f0c0a010e9382336b14ca3777`

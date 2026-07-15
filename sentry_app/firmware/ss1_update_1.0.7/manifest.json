@@ -2,8 +2,8 @@
   "format-version": 1,
   "name": "blinky",
   "channel": "local-acceptance",
-  "sha256": "9287730fd743cde0945e453b900dd10c516b5c16cc0f339ed07dfe20eff1cca6",
-  "mcuboot_image_digest": "5e1d3cb42996ef1431bbafdb229a64b26ff7b3e8da054c61a532b1db3039d395",
+  "sha256": "bbff71a704d67f411241168de5b42225c35f275daf9493bc7b90dbb9545dae94",
+  "mcuboot_image_digest": "a7c36be023a5b31896b384fa55cac9cd081238be3599b5323d4c42f5bcefeb72",
   "files": [
     {
       "type": "application",
@@ -12,8 +12,8 @@
       "image_index": "0",
       "slot_index_primary": "1",
       "slot_index_secondary": "2",
-      "version_MCUBOOT": "1.0.6+0",
-      "size": 261067,
+      "version_MCUBOOT": "1.0.7+0",
+      "size": 261312,
       "file": "blinky.signed.bin"
     }
   ]

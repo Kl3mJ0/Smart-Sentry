@@ -30,10 +30,10 @@ class ReleaseTests(unittest.TestCase):
         old = inv.upsert_device("AA:BB:CC:DD:EE:01", "Joseph_BLE-0000000000000001")
         new = inv.upsert_device("AA:BB:CC:DD:EE:02", "Joseph_BLE-0000000000000002")
         inv.set_fw_version(old, "1.0.3")
-        inv.set_fw_version(new, "1.0.6")
+        inv.set_fw_version(new, "1.0.7")
         devices = [
             {"device_id": old, "fw_version": "1.0.3"},
-            {"device_id": new, "fw_version": "1.0.6"},
+            {"device_id": new, "fw_version": "1.0.7"},
         ]
         service = LocalReleaseService(FakeFleet(devices), inv)
         self.assertEqual(asyncio.run(service.check_now()), 1)

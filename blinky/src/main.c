@@ -49,10 +49,12 @@
 /* ---------------- I2C / SHT3x ---------------- */
 
 #define I2C_NODE DT_NODELABEL(i2c21)
-#define SHT3X_ADDR 0x45
+#define SHT3X_ADDR_PRIMARY   0x44
+#define SHT3X_ADDR_ALTERNATE 0x45
 
 static const struct device *i2c_dev = DEVICE_DT_GET(I2C_NODE);
 static bool sht3x_ready;
+static uint16_t sht3x_addr = SHT3X_ADDR_PRIMARY;
 
 /* ---------------- Device name ---------------- */
 
@@ -806,7 +808,7 @@ static bool read_sht3x_sample(int16_t *out_temp_cdeg,
 		return false;
 	}
 
-	ret = i2c_write(i2c_dev, cmd, sizeof(cmd), SHT3X_ADDR);
+	ret = i2c_write(i2c_dev, cmd, sizeof(cmd), sht3x_addr);
 	if (ret != 0) {
 		printk("SHT3x measurement command failed: %d. Using fake temp.\n", ret);
 		*out_temp_cdeg = fake_temp_cdeg();
@@ -816,7 +818,7 @@ static bool read_sht3x_sample(int16_t *out_temp_cdeg,
 
 	k_msleep(20);
 
-	ret = i2c_read(i2c_dev, rx, sizeof(rx), SHT3X_ADDR);
+	ret = i2c_read(i2c_dev, rx, sizeof(rx), sht3x_addr);
 	if (ret != 0) {
 		printk("SHT3x read failed: %d. Using fake temp.\n", ret);
 		*out_temp_cdeg = fake_temp_cdeg();
@@ -1078,6 +1080,13 @@ static int gpio_init_all(void)
 
 static void sht3x_init_check(void)
 {
+	static const uint16_t addresses[] = {
+		SHT3X_ADDR_PRIMARY,
+		SHT3X_ADDR_ALTERNATE,
+	};
+	const uint8_t cmd[2] = {0x24, 0x00};
+	uint8_t rx[6];
+
 	if (!device_is_ready(i2c_dev)) {
 		sht3x_ready = false;
 		printk("I2C device %s is not ready. Using fake temperature.\n",
@@ -1085,11 +1094,33 @@ static void sht3x_init_check(void)
 		return;
 	}
 
-	sht3x_ready = true;
-
 	printk("I2C ready: %s\n", i2c_dev->name);
-	printk("Using SHT3x sensor at address 0x%02X\n", SHT3X_ADDR);
-	printk("SHT3x provides temperature and humidity\n");
+
+	for (size_t i = 0; i < ARRAY_SIZE(addresses); i++) {
+		uint16_t address = addresses[i];
+
+		if (i2c_write(i2c_dev, cmd, sizeof(cmd), address) != 0) {
+			continue;
+		}
+		k_msleep(20);
+		if (i2c_read(i2c_dev, rx, sizeof(rx), address) != 0) {
+			continue;
+		}
+		if (sht3x_crc8(&rx[0], 2) != rx[2] ||
+		    sht3x_crc8(&rx[3], 2) != rx[5]) {
+			continue;
+		}
+
+		sht3x_addr = address;
+		sht3x_ready = true;
+		printk("Detected SHT3x sensor at address 0x%02X\n", sht3x_addr);
+		printk("SHT3x provides temperature and humidity\n");
+		return;
+	}
+
+	sht3x_ready = false;
+	printk("SHT3x not found at 0x%02X or 0x%02X. Using fake temperature.\n",
+	       SHT3X_ADDR_PRIMARY, SHT3X_ADDR_ALTERNATE);
 }
 
 /* ---------------- main ---------------- */
@@ -1103,7 +1134,7 @@ int main(void)
 	int64_t last_maint_button_ms = 0;
 
 	printk("\n\nMAIN STARTED - SS1 firmware %s\n", APP_VERSION_STRING);
-	printk("OTA validation marker: automated fleet update 1.0.6 is running\n");
+	printk("OTA validation marker: SHT3x 0x44/0x45 auto-detect update 1.0.7 is running\n");
 
 	ret = init_permanent_device_name();
 	if (ret) {
