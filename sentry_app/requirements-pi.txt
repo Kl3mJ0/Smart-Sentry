@@ -1,0 +1,5 @@
+# Everything the Pi needs (UI + real BLE driver)
+-r requirements.txt
+bleak>=0.21
+cryptography>=41
+smpclient>=7.0  # sentry_agent/ota.py - MCUmgr/SMP-over-BLE OTA client

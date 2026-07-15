@@ -18,3 +18,7 @@ sentry_app.zip
 
 # Local scratch/design extraction
 extracted_design/
+
+# sentry-agent runtime state (created on the Pi at run time)
+sentry_app/sentry_agent/fleet.db
+sentry_app/out.txt
