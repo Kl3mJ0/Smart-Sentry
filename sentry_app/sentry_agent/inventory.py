@@ -182,7 +182,15 @@ class Inventory:
             (limit,),
         )
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        jobs = [dict(zip(cols, row)) for row in cur.fetchall()]
+        queue_position = 0
+        for job in jobs:
+            if job["state"] == "queued":
+                queue_position += 1
+                job["queue_position"] = queue_position
+            else:
+                job["queue_position"] = 0
+        return jobs
 
     def recoverable_trial_jobs(self) -> list[dict]:
         cur = self._conn.execute(
@@ -191,6 +199,18 @@ class Inventory:
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def requeue_interrupted_uploads(self) -> int:
+        """Put jobs interrupted before trial boot back at the queue head."""
+        cur = self._conn.execute(
+            "UPDATE ota_jobs SET state='queued', progress=0, result=?, updated_at=? "
+            "WHERE state IN ('running','uploading')",
+            ("Agent restarted; upload queued to resume from the beginning", time.time()),
+        )
+        self._conn.commit()
+        if cur.rowcount:
+            self._changed()
+        return cur.rowcount
 
     def jobs_for_device(self, device_id: str) -> list[dict]:
         cur = self._conn.execute(

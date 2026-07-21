@@ -15,7 +15,9 @@ KEEP `creds.py` PRIVATE — it embeds client 1002's private key.
 - `backend.py` — Qt object bridging driver state to QML
 - `fake_driver.py` — simulated SS1 (default on Windows; demo: tap the status
   pill to cycle states, Reconnect plays the full sequence)
-- `ble_driver.py` — real SS1 driver (default on Linux; auto-reconnects forever)
+- `agent_process.py` — starts the fleet agent in the background when needed
+- `agent_driver.py` — dashboard IPC client for the fleet agent
+- `ble_driver.py` — legacy single-SS1 diagnostic driver (`--driver ble` only)
 - `creds.py` — client 1002 key + certificate (from PI_CLIENT_HANDOFF.md)
 
 ## Run on Windows (development, simulated data)
@@ -35,10 +37,16 @@ pip3 install -r requirements-pi.txt
 # if the PySide6 pip wheel is unavailable for your OS image, use apt instead:
 #   sudo apt install python3-pyside6.qtcore python3-pyside6.qtgui \
 #                    python3-pyside6.qtqml python3-pyside6.qtquick
-python3 main.py                      # real BLE, windowed
+python3 main.py                      # integrated BLE fleet + OTA, windowed
 python3 main.py --fullscreen         # touchscreen kiosk
 python3 main.py --driver fake        # UI demo without SS1 powered
+python3 main.py --driver ble         # legacy direct-BLE diagnostics only
 ```
+
+On Linux the dashboard defaults to `--driver agent`. It connects to an
+existing sentry-agent service when present; otherwise it starts the bundled
+agent as a detached background process. Do not separately run
+`sentry_agent/agent_main.py` in a terminal.
 
 First Pi run checklist:
 
@@ -61,7 +69,8 @@ Description=Smart Sentry dashboard
 After=graphical-session.target bluetooth.target
 
 [Service]
-ExecStart=/usr/bin/python3 %h/sentry_app/main.py --driver ble --fullscreen
+WorkingDirectory=%h/Smart-Sentry-OTA/sentry_app
+ExecStart=%h/sentry-venv/bin/python3 main.py --fullscreen
 Restart=on-failure
 RestartSec=3
 
@@ -92,25 +101,24 @@ systemctl --user enable --now sentry-dashboard
 python main.py --screenshot frame.png   # saves a frame after 3 s and exits
 ```
 
-## sentry_agent/ - headless fleet and secure updater service
+## sentry_agent/ - integrated fleet and secure updater
 
 The dashboard connecting to BLE directly (`--driver ble`) is fine for one
 device and one process, but doesn't scale to a fleet: there's only one global
 connection/sensor set, and an independent OTA process would fight the dashboard for the
-adapter. `sentry_agent/` is a separate headless service that owns BLE, the
-device inventory and OTA exclusively; the dashboard becomes a thin client
-of it via `--driver agent` (see `agent_driver.py`). Not switched on by
-default yet - `--driver ble` still works unchanged.
+adapter. `sentry_agent/` is the headless process that owns BLE, device
+inventory and OTA exclusively; the dashboard is its thin client via
+`agent_driver.py`. This is now the Linux default, and the dashboard starts it
+automatically when no service is already running.
 
 ```bash
 pip3 install -r requirements-pi.txt   # now also installs smpclient
-cd sentry_agent && python3 agent_main.py     # run in foreground to try it
-# in another terminal/window:
-python3 main.py --driver agent
+python3 main.py
 ```
 
-To run it as a systemd service instead (survives UI restarts, starts at
-boot regardless of login):
+For production it can instead run as a systemd service, so BLE monitoring and
+an in-progress OTA survive a full UI restart. The dashboard detects and reuses
+the service automatically:
 
 ```bash
 sudo cp systemd/sentry-agent.service /etc/systemd/system/
@@ -119,10 +127,12 @@ sudo systemctl enable --now sentry-agent
 ```
 
 When `sentry-agent` is enabled, the dashboard must use the agent rather than
-opening BLE itself. Change the dashboard service's `ExecStart` to:
+opening BLE itself. The Linux default already does this. Add
+`--external-agent` if you want the UI to report a stopped service instead of
+launching its bundled fallback:
 
 ```ini
-ExecStart=/usr/bin/python3 %h/sentry_app/main.py --driver agent --fullscreen
+ExecStart=%h/sentry-venv/bin/python3 %h/Smart-Sentry-OTA/sentry_app/main.py --driver agent --external-agent --fullscreen
 ```
 
 Then run `systemctl --user daemon-reload && systemctl --user restart

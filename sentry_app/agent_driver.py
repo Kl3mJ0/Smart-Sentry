@@ -3,9 +3,8 @@ instead of touching BLE directly - the dashboard becomes a client of the
 agent service (see sentry_agent/ipc.py) rather than owning the adapter, so
 OTA/monitoring keep running even if the UI restarts.
 
-The dashboard is still single-device UI, so this driver locks onto the
-first device_id it sees and reports only that one; a real multi-device
-dashboard is separate, not-yet-built work.
+The dashboard presents one selected device at a time while retaining the
+whole discovered fleet and OTA queue for navigation and status display.
 """
 import asyncio
 import json
@@ -33,6 +32,9 @@ class AgentDriver:
                 await self._session()
             except Exception as e:
                 print(f"[agent-driver] session ended: {e!r} - retrying in {RETRY_DELAY_S}s")
+                self.backend.set_update_status(
+                    "agent_offline", "Starting or reconnecting to the background fleet agent…"
+                )
             self._writer = None
             self.backend.post("signal", 0)
             self.backend.post("conn_state", "scanning")
@@ -42,6 +44,7 @@ class AgentDriver:
     async def _session(self):
         reader, writer = await asyncio.open_unix_connection(SOCK_PATH)
         self._writer = writer
+        self.backend.post("reconnecting", False)
         try:
             while True:
                 line = await reader.readline()
@@ -81,6 +84,10 @@ class AgentDriver:
             self.backend.set_jobs(msg.get("jobs", []))
         elif mtype == "update_status":
             self.backend.set_update_status(msg.get("status"), msg.get("message"), msg.get("latest_version"))
+        elif mtype == "ack" and not msg.get("ok", False):
+            self.backend.set_update_status(
+                "error", f"{msg.get('cmd', 'Agent command')} failed: {msg.get('error') or 'unknown error'}"
+            )
 
     def _apply_selected(self):
         if self.device_id and self.device_id in self.devices:
@@ -127,13 +134,23 @@ class AgentDriver:
 
     def check_updates(self):
         self.backend.set_update_status("checking", "Checking local signed firmware releases…")
-        self._send_cmd("check_updates", include_device=False)
+        if not self._send_cmd("check_updates", include_device=False):
+            self.backend.set_update_status("agent_offline", "Fleet agent is not ready yet; retry in a moment")
 
     def _send_cmd(self, cmd: str, include_device=True):
         if self._writer is None or (include_device and self.device_id is None):
-            return
+            return False
         payload = {"cmd": cmd}
         if include_device:
             payload["device_id"] = self.device_id
         line = json.dumps(payload) + "\n"
         self._writer.write(line.encode())
+        asyncio.create_task(self._drain_writer())
+        return True
+
+    async def _drain_writer(self):
+        try:
+            if self._writer:
+                await self._writer.drain()
+        except (ConnectionError, OSError):
+            pass

@@ -7,15 +7,18 @@ fights over the adapter.
 
     python3 agent_main.py
 
-Nothing here auto-executes an OTA: enqueue_ota jobs sit in the queue until
-something (an operator via the IPC socket, or the cloud poller once it
-exists) puts one there. The queue worker below only *drains* jobs that are
-already queued, one at a time - but once it does, it drives the full
-upload -> trial-boot -> health-check -> confirm cycle itself. Current SS1
-firmware still auto-confirms during startup, so the health gate becomes
-authoritative only after that firmware behaviour is removed and tested.
+The local release service checks at startup and on a timer, queues every
+connected older SS1, and the queue worker drives the full upload -> trial
+boot -> health check -> Pi confirmation cycle one device at a time.
 """
 import asyncio
+import os
+from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # keeps cross-platform tooling/imports readable; agent itself is Linux-only
+    fcntl = None
 
 from fleet import FleetManager
 from inventory import Inventory
@@ -34,14 +37,31 @@ OTA_POLL_INTERVAL_S = 5.0
 # BLE supervision timeout) is found on the firmware side.
 MAX_OTA_ATTEMPTS = 5
 OTA_RETRY_DELAY_S = 3.0
+INSTANCE_LOCK_PATH = Path("/tmp/sentry_agent.lock")
 
-# Intended production health check after a trial-boot: the device must reconnect on its own
+
+def acquire_instance_lock():
+    """Hold an OS lock for this process so only one owner can touch BLE."""
+    if fcntl is None:
+        raise RuntimeError("sentry-agent requires Linux file locking")
+    lock_file = INSTANCE_LOCK_PATH.open("a+")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_file.close()
+        return None
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file
+
+# Production health check after a trial-boot: the device must reconnect on its own
 # (proves BLE/cert-auth still work post-flash) and keep streaming fresh
 # temp+humidity for HEALTH_CHECK_STABLE_S straight, within
 # HEALTH_CHECK_TIMEOUT_S of the reset. The agent confirms only after this
-# passes. Current SS1 firmware still auto-confirms at startup, so the agent
-# cannot yet guarantee that a failure remains unconfirmed or rolls back; see
-# docs/ota-auth-and-device-id.md.
+# passes. Failed trials remain unconfirmed and are rebooted for MCUboot
+# rollback; see docs/ota-auth-and-device-id.md.
 HEALTH_CHECK_TIMEOUT_S = 90.0
 HEALTH_CHECK_STABLE_S = 15.0
 HEALTH_CHECK_POLL_S = 1.0
@@ -202,10 +222,13 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
     """Drains the OTA queue sequentially (this Pi has one adapter, so
     sequential-per-adapter and sequential-globally are the same thing for
     now)."""
-    recovered_trials = False
+    startup_recovery_done = False
     while True:
-        if not recovered_trials:
-            recovered_trials = True
+        if not startup_recovery_done:
+            startup_recovery_done = True
+            recovered_uploads = inventory.requeue_interrupted_uploads()
+            if recovered_uploads:
+                print(f"[ota] requeued {recovered_uploads} interrupted upload(s)")
             for trial in inventory.recoverable_trial_jobs():
                 inventory.set_job_state(trial["id"], "checking_health", result="Agent restarted; recovering trial")
                 try:
@@ -265,6 +288,10 @@ async def ota_worker(fleet: FleetManager, inventory: Inventory):
 
 
 async def main():
+    instance_lock = acquire_instance_lock()
+    if instance_lock is None:
+        print("[agent] another sentry-agent already owns BLE; exiting")
+        return
     inventory = Inventory()
     fleet = FleetManager(inventory)
     releases = LocalReleaseService(fleet, inventory)
@@ -274,14 +301,17 @@ async def main():
         releases=releases,
     )
 
-    server = await ipc.start()
-    async with server:
-        await asyncio.gather(
-            fleet.run(),
-            ota_worker(fleet, inventory),
-            releases.run(),
-            server.serve_forever(),
-        )
+    try:
+        server = await ipc.start()
+        async with server:
+            await asyncio.gather(
+                fleet.run(),
+                ota_worker(fleet, inventory),
+                releases.run(),
+                server.serve_forever(),
+            )
+    finally:
+        instance_lock.close()
 
 
 if __name__ == "__main__":

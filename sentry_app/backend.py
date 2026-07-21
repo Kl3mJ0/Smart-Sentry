@@ -9,6 +9,8 @@ from datetime import datetime
 from PySide6.QtCore import QObject, Property, QTimer, Signal, Slot
 
 CONN_STATES = ("scanning", "connecting", "authenticating", "secure")
+ACTIVE_UPDATE_STATES = ("running", "uploading", "trial_pending", "checking_health", "confirming")
+PENDING_UPDATE_STATES = ("queued",) + ACTIVE_UPDATE_STATES
 
 
 class SentryBackend(QObject):
@@ -211,9 +213,22 @@ class SentryBackend(QObject):
 
     @Property(int, notify=updateChanged)
     def updateProgress(self):
-        active = next((j for j in self._jobs if j.get("state") in
-                       ("running", "uploading", "trial_pending", "checking_health", "confirming")), None)
+        active = next((j for j in self._jobs if j.get("state") in ACTIVE_UPDATE_STATES), None)
         return int(active.get("progress", 0)) if active else 0
+
+    @Property(int, notify=jobsChanged)
+    def pendingJobCount(self):
+        return sum(1 for job in self._jobs if job.get("state") in PENDING_UPDATE_STATES)
+
+    @Property(str, notify=jobsChanged)
+    def activeUpdateDevice(self):
+        active = next((j for j in self._jobs if j.get("state") in ACTIVE_UPDATE_STATES), None)
+        return (active or {}).get("device_name") or (active or {}).get("device_id", "")
+
+    @Property(str, notify=jobsChanged)
+    def activeUpdateState(self):
+        active = next((j for j in self._jobs if j.get("state") in ACTIVE_UPDATE_STATES), None)
+        return (active or {}).get("state", "")
 
     @Property("QVariantList", notify=jobsChanged)
     def jobs(self): return self._jobs

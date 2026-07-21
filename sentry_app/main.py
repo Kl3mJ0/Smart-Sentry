@@ -1,6 +1,6 @@
 """Smart Sentry dashboard - native Qt Quick app.
 
-  python main.py                # fake data on Windows, real BLE on Linux/Pi
+  python main.py                # fake data on Windows, integrated fleet agent on Linux/Pi
   python main.py --driver fake  # force simulated data
   python main.py --driver ble   # force real SS1 connection
   python main.py --fullscreen   # kiosk mode (touchscreen)
@@ -41,7 +41,11 @@ def pick_font(candidates, fallback):
 def main():
     parser = argparse.ArgumentParser(description="Smart Sentry dashboard")
     parser.add_argument("--driver", choices=("fake", "ble", "agent"),
-                        default="ble" if sys.platform.startswith("linux") else "fake")
+                        default="agent" if sys.platform.startswith("linux") else "fake")
+    parser.add_argument(
+        "--external-agent", action="store_true",
+        help="with --driver agent, wait for a separately managed sentry-agent instead of starting one",
+    )
     parser.add_argument("--fullscreen", action="store_true")
     parser.add_argument("--screenshot", metavar="PATH", help="debug: save a frame and exit")
     args = parser.parse_args()
@@ -87,6 +91,9 @@ def main():
             app.quit()
         QTimer.singleShot(3000, grab)
 
+    if args.driver == "agent" and not args.external_agent:
+        from agent_process import AgentProcessManager
+        loop.create_task(AgentProcessManager().run())
     loop.create_task(driver.run())
     with loop:
         loop.run_forever()

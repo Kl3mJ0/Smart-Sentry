@@ -9,7 +9,7 @@ Wants=bluetooth.target
 # sentry_agent/agent_main.py's docstring for why the dashboard no longer
 # owns BLE directly.
 User=klemjo
-WorkingDirectory=/home/klemjo/sentry_app/sentry_agent
+WorkingDirectory=/home/klemjo/Smart-Sentry-OTA/sentry_app/sentry_agent
 ExecStart=/home/klemjo/sentry-venv/bin/python3 -u agent_main.py
 Restart=on-failure
 RestartSec=3

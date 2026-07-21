@@ -219,11 +219,12 @@ Window {
                             anchors.centerIn: parent; spacing: 2
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
-                                text: sentry.updateStatus === "checking" ? "CHECKING…" :
+                                text: sentry.activeUpdateDevice ? "UPDATING SS1" :
+                                      sentry.updateStatus === "checking" ? "CHECKING…" :
                                       sentry.updateStatus === "up_to_date" ? "FIRMWARE UP TO DATE" : "FIRMWARE / QUEUE"
                                 color: "#7fd4ff"; font.family: uiFont; font.pixelSize: 11; font.bold: true
                             }
-                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: sentry.jobs.length + " job(s) · " + sentry.updateProgress + "%"; color: "#8b95a3"; font.family: monoFont; font.pixelSize: 9 }
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: sentry.activeUpdateDevice ? sentry.updateProgress + "% · " + sentry.activeUpdateDevice.slice(-8) : sentry.pendingJobCount + " pending"; color: "#8b95a3"; font.family: monoFont; font.pixelSize: 9 }
                         }
                         MouseArea { anchors.fill: parent; onClicked: root.updatePanelOpen = true }
                     }
@@ -643,9 +644,14 @@ Window {
                         }
                     }
                     Rectangle { width: parent.width; height: 1; color: "#267FD4FF" }
-                    Text { text: "LATEST LOCAL RELEASE  " + (sentry.latestVersion || "NONE") + "    ·    UPDATES RUN ONE SS1 AT A TIME"; color: "#7fd4ff"; font.family: monoFont; font.pixelSize: 12 }
+                    Text { text: "LATEST LOCAL RELEASE  " + (sentry.latestVersion || "NONE") + "    ·    " + sentry.pendingJobCount + " PENDING    ·    UPDATES RUN ONE SS1 AT A TIME"; color: "#7fd4ff"; font.family: monoFont; font.pixelSize: 12 }
+                    Text {
+                        visible: sentry.activeUpdateDevice.length > 0
+                        text: "NOW UPDATING  " + sentry.activeUpdateDevice + "    ·    " + String(sentry.activeUpdateState).replace("_", " ").toUpperCase() + "    ·    " + sentry.updateProgress + "%"
+                        color: "#5eead4"; font.family: monoFont; font.pixelSize: 12; font.bold: true
+                    }
                     Item {
-                        width: parent.width; height: 340
+                        width: parent.width; height: sentry.activeUpdateDevice.length > 0 ? 312 : 340
                         Text { anchors.centerIn: parent; visible: sentry.jobs.length === 0; text: "No firmware jobs yet"; color: "#5a6472"; font.pixelSize: 16 }
                         Column {
                             width: parent.width; spacing: 8
@@ -657,7 +663,7 @@ Window {
                                         anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 14
                                         Text { width: 180; anchors.verticalCenter: parent.verticalCenter; text: (modelData.device_name || modelData.device_id); elide: Text.ElideRight; color: "#eaf6ff"; font.family: monoFont; font.pixelSize: 12 }
                                         Text { width: 80; anchors.verticalCenter: parent.verticalCenter; text: "→ " + (modelData.target_version || "?"); color: "#7fd4ff"; font.family: monoFont; font.pixelSize: 12 }
-                                        Text { width: 155; anchors.verticalCenter: parent.verticalCenter; text: String(modelData.state).replace("_", " ").toUpperCase(); color: modelData.state === "failed" ? "#ff6b6b" : "#5eead4"; font.pixelSize: 11; font.bold: true }
+                                        Text { width: 155; anchors.verticalCenter: parent.verticalCenter; text: modelData.queue_position ? "QUEUED #" + modelData.queue_position : String(modelData.state).replace("_", " ").toUpperCase(); color: (modelData.state === "failed" || modelData.state === "health_check_failed" || modelData.state === "confirm_failed") ? "#ff6b6b" : "#5eead4"; font.pixelSize: 11; font.bold: true }
                                         Rectangle {
                                             width: 220; height: 8; radius: 4; anchors.verticalCenter: parent.verticalCenter; color: "#1AFFFFFF"
                                             Rectangle { width: parent.width * (modelData.progress || 0) / 100; height: parent.height; radius: 4; color: "#4aa8ff" }
