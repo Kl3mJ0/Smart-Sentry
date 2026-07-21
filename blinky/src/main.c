@@ -13,11 +13,13 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/printk-hooks.h>
 #include <zephyr/sys/reboot.h>
 #include <zephyr/dfu/mcuboot.h>
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/hwinfo.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
@@ -32,14 +34,12 @@
 #include <app_version.h>
 
 #include "sentry_auth.h"
-#include "aux_uart.h"
 #include "cs_reflector.h"
 
 /* ---------------- Timing ---------------- */
 
 #define SAMPLE_PERIOD_MS 500
 #define NOTIFY_PERIOD_MS 1000
-#define AUX_TX_PERIOD_MS 1000
 #define BUTTON_DEBOUNCE_MS 250
 #define RECONNECT_QUIET_MS 1500
 
@@ -48,13 +48,45 @@
 
 /* ---------------- I2C / SHT3x ---------------- */
 
-#define I2C_NODE DT_NODELABEL(i2c21)
+#define PROD_I2C_NODE DT_NODELABEL(prod_i2c)
+#define DK_I2C_NODE   DT_NODELABEL(i2c21)
+#define DEBUG_UART_NODE DT_NODELABEL(uart30)
 #define SHT3X_ADDR_PRIMARY   0x44
 #define SHT3X_ADDR_ALTERNATE 0x45
 
-static const struct device *i2c_dev = DEVICE_DT_GET(I2C_NODE);
-static bool sht3x_ready;
-static uint16_t sht3x_addr = SHT3X_ADDR_PRIMARY;
+static const struct device *const i2c_candidates[] = {
+	DEVICE_DT_GET(PROD_I2C_NODE),
+	DEVICE_DT_GET(DK_I2C_NODE),
+};
+static const struct device *i2c_dev;
+static const struct device *const debug_uart = DEVICE_DT_GET(DEBUG_UART_NODE);
+enum sensor_kind {
+	SENSOR_NONE,
+	SENSOR_SHT3X,
+	SENSOR_SHT4X,
+};
+
+static bool sensor_ready;
+static enum sensor_kind sensor_kind;
+static uint16_t sensor_addr = SHT3X_ADDR_PRIMARY;
+
+static int debug_uart_char_out(int c)
+{
+	/* A raw UART hook does not perform the console's LF-to-CRLF conversion. */
+	if (c == '\n') {
+		uart_poll_out(debug_uart, '\r');
+	}
+	uart_poll_out(debug_uart, (unsigned char)c);
+	return c;
+}
+
+static void debug_uart_force_console(void)
+{
+	if (device_is_ready(debug_uart)) {
+		/* Ensure printk always targets the production board's soldered TX. */
+		__printk_hook_install(debug_uart_char_out);
+	}
+}
 
 /* ---------------- Device name ---------------- */
 
@@ -68,12 +100,16 @@ static char device_name[sizeof(DEVICE_NAME_PREFIX) + DEVICE_ID_HEX_LEN];
 
 #define MAINT_LED_NODE     DT_ALIAS(led0)
 #define MAINT_BUTTON_NODE  DT_ALIAS(sw0)
+#define SENSOR_ENABLE_NODE DT_NODELABEL(sensor_enable)
 
 static const struct gpio_dt_spec maint_led =
 	GPIO_DT_SPEC_GET(MAINT_LED_NODE, gpios);
 
 static const struct gpio_dt_spec maint_button =
 	GPIO_DT_SPEC_GET(MAINT_BUTTON_NODE, gpios);
+
+static const struct gpio_dt_spec sensor_enable =
+	GPIO_DT_SPEC_GET(SENSOR_ENABLE_NODE, enable_gpios);
 
 static struct gpio_callback maint_button_cb;
 
@@ -784,33 +820,46 @@ static int16_t fake_temp_cdeg(void)
 	return fake;
 }
 
-static bool read_sht3x_sample(int16_t *out_temp_cdeg,
-			      uint16_t *out_hum_cpercent)
+static const char *sensor_kind_name(enum sensor_kind kind)
+{
+	return kind == SENSOR_SHT4X ? "SHT4x" : "SHT3x";
+}
+
+static bool read_sensor_sample(int16_t *out_temp_cdeg,
+			       uint16_t *out_hum_cpercent)
 {
 	int ret;
-
-	uint8_t cmd[2] = {0x24, 0x00};
+	const uint8_t sht3x_cmd[2] = {0x24, 0x00};
+	const uint8_t sht4x_cmd = 0xFD;
+	const uint8_t *cmd;
+	size_t cmd_len;
 	uint8_t rx[6];
-
 	uint8_t temp_crc;
 	uint8_t hum_crc;
-
 	uint16_t raw_temp;
 	uint16_t raw_hum;
-
 	int32_t temp_cdeg;
-	uint32_t hum_cpercent;
+	int32_t hum_cpercent;
 
-	if (!sht3x_ready) {
-		printk("SHT3x not ready. Using fake temp.\n");
+	if (!sensor_ready) {
+		printk("Temperature sensor not ready. Using fake temp.\n");
 		*out_temp_cdeg = fake_temp_cdeg();
 		*out_hum_cpercent = 0;
 		return false;
 	}
 
-	ret = i2c_write(i2c_dev, cmd, sizeof(cmd), sht3x_addr);
+	if (sensor_kind == SENSOR_SHT4X) {
+		cmd = &sht4x_cmd;
+		cmd_len = sizeof(sht4x_cmd);
+	} else {
+		cmd = sht3x_cmd;
+		cmd_len = sizeof(sht3x_cmd);
+	}
+
+	ret = i2c_write(i2c_dev, cmd, cmd_len, sensor_addr);
 	if (ret != 0) {
-		printk("SHT3x measurement command failed: %d. Using fake temp.\n", ret);
+		printk("%s measurement command failed: %d. Using fake temp.\n",
+		       sensor_kind_name(sensor_kind), ret);
 		*out_temp_cdeg = fake_temp_cdeg();
 		*out_hum_cpercent = 0;
 		return false;
@@ -818,9 +867,10 @@ static bool read_sht3x_sample(int16_t *out_temp_cdeg,
 
 	k_msleep(20);
 
-	ret = i2c_read(i2c_dev, rx, sizeof(rx), sht3x_addr);
+	ret = i2c_read(i2c_dev, rx, sizeof(rx), sensor_addr);
 	if (ret != 0) {
-		printk("SHT3x read failed: %d. Using fake temp.\n", ret);
+		printk("%s read failed: %d. Using fake temp.\n",
+		       sensor_kind_name(sensor_kind), ret);
 		*out_temp_cdeg = fake_temp_cdeg();
 		*out_hum_cpercent = 0;
 		return false;
@@ -830,16 +880,16 @@ static bool read_sht3x_sample(int16_t *out_temp_cdeg,
 	hum_crc = sht3x_crc8(&rx[3], 2);
 
 	if (temp_crc != rx[2]) {
-		printk("SHT3x temperature CRC failed. Got 0x%02X, expected 0x%02X. Using fake temp.\n",
-		       rx[2], temp_crc);
+		printk("%s temperature CRC failed. Using fake temp.\n",
+		       sensor_kind_name(sensor_kind));
 		*out_temp_cdeg = fake_temp_cdeg();
 		*out_hum_cpercent = 0;
 		return false;
 	}
 
 	if (hum_crc != rx[5]) {
-		printk("SHT3x humidity CRC failed. Got 0x%02X, expected 0x%02X. Using fake temp.\n",
-		       rx[5], hum_crc);
+		printk("%s humidity CRC failed. Using fake temp.\n",
+		       sensor_kind_name(sensor_kind));
 		*out_temp_cdeg = fake_temp_cdeg();
 		*out_hum_cpercent = 0;
 		return false;
@@ -849,7 +899,12 @@ static bool read_sht3x_sample(int16_t *out_temp_cdeg,
 	raw_hum = ((uint16_t)rx[3] << 8) | rx[4];
 
 	temp_cdeg = -4500 + (int32_t)(((int64_t)17500 * raw_temp) / 65535);
-	hum_cpercent = (uint32_t)(((uint64_t)10000 * raw_hum) / 65535);
+	if (sensor_kind == SENSOR_SHT4X) {
+		hum_cpercent = -600 + (int32_t)(((int64_t)12500 * raw_hum) / 65535);
+		hum_cpercent = CLAMP(hum_cpercent, 0, 10000);
+	} else {
+		hum_cpercent = (int32_t)(((int64_t)10000 * raw_hum) / 65535);
+	}
 
 	*out_temp_cdeg = (int16_t)temp_cdeg;
 	*out_hum_cpercent = (uint16_t)hum_cpercent;
@@ -868,7 +923,7 @@ static void update_sensor_averages(void)
 	uint8_t temp_count;
 	uint8_t hum_count;
 
-	read_sht3x_sample(&temp_sample, &hum_sample);
+	read_sensor_sample(&temp_sample, &hum_sample);
 
 	temp_samples_cdeg[temp_sample_index] = temp_sample;
 	temp_sample_index = (temp_sample_index + 1) % TEMP_AVG_WINDOW_SAMPLES;
@@ -900,7 +955,8 @@ static void update_sensor_averages(void)
 
 	hum_avg_cpercent = (uint16_t)(hum_sum / hum_count);
 
-	printk("SHT3x temp: %d.%02d C, temp avg: %d.%02d C | humidity: %u.%02u %%RH, humidity avg: %u.%02u %%RH\n",
+	printk("%s temp: %d.%02d C, temp avg: %d.%02d C | humidity: %u.%02u %%RH, humidity avg: %u.%02u %%RH\n",
+	       sensor_kind_name(sensor_kind),
 	       temp_sample / 100,
 	       temp_sample < 0 ? -(temp_sample % 100) : temp_sample % 100,
 	       temp_avg_cdeg / 100,
@@ -1045,11 +1101,26 @@ static int gpio_init_all(void)
 		return -ENODEV;
 	}
 
+	if (!gpio_is_ready_dt(&sensor_enable)) {
+		printk("Sensor-enable GPIO not ready\n");
+		return -ENODEV;
+	}
+
 	ret = gpio_pin_configure_dt(&maint_led, GPIO_OUTPUT_INACTIVE);
 	if (ret < 0) {
 		printk("Failed to configure LED0: %d\n", ret);
 		return ret;
 	}
+
+	ret = gpio_pin_configure_dt(&sensor_enable, GPIO_OUTPUT_ACTIVE);
+	if (ret < 0) {
+		printk("Failed to enable sensor rail: %d\n", ret);
+		return ret;
+	}
+
+	/* Allow the load switch, pull-ups and SHT41/SHT3x to power up. */
+	k_msleep(20);
+	printk("Sensor rail enabled on P2.03\n");
 
 	ret = gpio_pin_configure_dt(&maint_button, GPIO_INPUT);
 	if (ret < 0) {
@@ -1078,48 +1149,82 @@ static int gpio_init_all(void)
 	return 0;
 }
 
-static void sht3x_init_check(void)
+static void sensor_init_check(void)
 {
 	static const uint16_t addresses[] = {
 		SHT3X_ADDR_PRIMARY,
 		SHT3X_ADDR_ALTERNATE,
 	};
-	const uint8_t cmd[2] = {0x24, 0x00};
+	const uint8_t sht3x_cmd[2] = {0x24, 0x00};
+	const uint8_t sht4x_cmd = 0xFD;
 	uint8_t rx[6];
 
-	if (!device_is_ready(i2c_dev)) {
-		sht3x_ready = false;
-		printk("I2C device %s is not ready. Using fake temperature.\n",
-		       i2c_dev->name);
-		return;
+	for (size_t bus = 0; bus < ARRAY_SIZE(i2c_candidates); bus++) {
+		const struct device *candidate = i2c_candidates[bus];
+		enum sensor_kind candidate_kind = bus == 0 ? SENSOR_SHT4X : SENSOR_SHT3X;
+		const uint8_t *cmd = candidate_kind == SENSOR_SHT4X ?
+			&sht4x_cmd : sht3x_cmd;
+		size_t cmd_len = candidate_kind == SENSOR_SHT4X ?
+			sizeof(sht4x_cmd) : sizeof(sht3x_cmd);
+
+		if (!device_is_ready(candidate)) {
+			printk("I2C bus %s is not ready\n", candidate->name);
+			continue;
+		}
+
+		printk("Probing %s on I2C bus %s (%s wiring)\n",
+		       sensor_kind_name(candidate_kind), candidate->name,
+		       bus == 0 ? "production P0.04/P0.03" : "DK P1.11/P1.12");
+
+		int recovery_ret = i2c_recover_bus(candidate);
+		printk("I2C bus recovery on %s: %d\n", candidate->name, recovery_ret);
+
+		for (size_t i = 0; i < ARRAY_SIZE(addresses); i++) {
+			uint16_t address = addresses[i];
+
+			/* The production SHT41 has a fixed 0x44 address. */
+			if (candidate_kind == SENSOR_SHT4X &&
+			    address != SHT3X_ADDR_PRIMARY) {
+				continue;
+			}
+
+			printk("Probing %s address 0x%02X\n",
+			       sensor_kind_name(candidate_kind), address);
+			int write_ret = i2c_write(candidate, cmd, cmd_len, address);
+			if (write_ret != 0) {
+				printk("%s 0x%02X command failed: %d\n",
+				       sensor_kind_name(candidate_kind), address, write_ret);
+				continue;
+			}
+			k_msleep(20);
+			int read_ret = i2c_read(candidate, rx, sizeof(rx), address);
+			if (read_ret != 0) {
+				printk("%s 0x%02X read failed: %d\n",
+				       sensor_kind_name(candidate_kind), address, read_ret);
+				continue;
+			}
+			if (sht3x_crc8(&rx[0], 2) != rx[2] ||
+			    sht3x_crc8(&rx[3], 2) != rx[5]) {
+				printk("%s 0x%02X replied with invalid CRC\n",
+				       sensor_kind_name(candidate_kind), address);
+				continue;
+			}
+
+			i2c_dev = candidate;
+			sensor_addr = address;
+			sensor_kind = candidate_kind;
+			sensor_ready = true;
+			printk("Detected %s on %s at address 0x%02X\n",
+			       sensor_kind_name(sensor_kind), i2c_dev->name,
+			       sensor_addr);
+			printk("Sensor provides temperature and humidity over BLE\n");
+			return;
+		}
 	}
 
-	printk("I2C ready: %s\n", i2c_dev->name);
-
-	for (size_t i = 0; i < ARRAY_SIZE(addresses); i++) {
-		uint16_t address = addresses[i];
-
-		if (i2c_write(i2c_dev, cmd, sizeof(cmd), address) != 0) {
-			continue;
-		}
-		k_msleep(20);
-		if (i2c_read(i2c_dev, rx, sizeof(rx), address) != 0) {
-			continue;
-		}
-		if (sht3x_crc8(&rx[0], 2) != rx[2] ||
-		    sht3x_crc8(&rx[3], 2) != rx[5]) {
-			continue;
-		}
-
-		sht3x_addr = address;
-		sht3x_ready = true;
-		printk("Detected SHT3x sensor at address 0x%02X\n", sht3x_addr);
-		printk("SHT3x provides temperature and humidity\n");
-		return;
-	}
-
-	sht3x_ready = false;
-	printk("SHT3x not found at 0x%02X or 0x%02X. Using fake temperature.\n",
+	sensor_ready = false;
+	sensor_kind = SENSOR_NONE;
+	printk("No supported temperature sensor found at 0x%02X or 0x%02X. Using fake temperature.\n",
 	       SHT3X_ADDR_PRIMARY, SHT3X_ADDR_ALTERNATE);
 }
 
@@ -1130,11 +1235,11 @@ int main(void)
 	int ret;
 	int64_t last_sample_ms;
 	int64_t last_notify_ms;
-	int64_t last_aux_tx_ms;
 	int64_t last_maint_button_ms = 0;
 
+	debug_uart_force_console();
 	printk("\n\nMAIN STARTED - SS1 firmware %s\n", APP_VERSION_STRING);
-	printk("OTA validation marker: SHT3x 0x44/0x45 auto-detect update 1.0.7 is running\n");
+	printk("OTA validation marker: forced UART30 with CRLF + production GPIO I2C 1.0.15 is running\n");
 
 	ret = init_permanent_device_name();
 	if (ret) {
@@ -1149,8 +1254,7 @@ int main(void)
 		return 0;
 	}
 
-	sht3x_init_check();
-	aux_uart_init_check();
+	sensor_init_check();
 
 	set_led_state(0, false);
 
@@ -1195,15 +1299,12 @@ int main(void)
 		return ret;
 	}
 
-	aux_uart_load_identity();
-
 	advertising_start();
 	printk("OTA image state: %s; awaiting Pi health confirmation when pending\n",
 	       boot_is_img_confirmed() ? "confirmed" : "trial/unconfirmed");
 
 	last_sample_ms = k_uptime_get();
 	last_notify_ms = k_uptime_get();
-	last_aux_tx_ms = k_uptime_get();
 
 	while (1) {
 		int64_t now = k_uptime_get();
@@ -1217,11 +1318,6 @@ int main(void)
 			last_notify_ms = now;
 			notify_temperature();
 			notify_humidity();
-		}
-
-		if ((now - last_aux_tx_ms) >= AUX_TX_PERIOD_MS) {
-			last_aux_tx_ms = now;
-			aux_uart_send_temp_humidity(temp_avg_cdeg, hum_avg_cpercent);
 		}
 
 		if (maint_button_pending) {

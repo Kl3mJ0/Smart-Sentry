@@ -3,9 +3,9 @@
  *
  * Auxiliary UART (uart30) - wired sensor-bridge packet output.
  *
- * Independent, second UART instance on P0.00(TX)/P0.01(RX)/P0.02(RTS)/
- * P0.03(CTS) - physically separate from the uart20 console and unrelated
- * to the BLE link. Feeds a TTL serial converter, not SS2.
+ * UART instance on P0.00(TX)/P0.01(RX)/P0.02(RTS)/P0.03(CTS). On the
+ * production board it is shared with the printk/debug console because this
+ * is the only exposed serial output. Feeds a TTL serial converter, not SS2.
  *
  * Implements the reference "sensor bridge unit" packet format:
  *   m <PAN 4ch> <unit ID 2ch> d <data> r -<RSSI 3ch> s <seq 3ch> CR
