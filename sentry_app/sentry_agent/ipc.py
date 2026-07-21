@@ -11,6 +11,8 @@ Wire format (newline-delimited JSON, both directions):
   client -> server: {"cmd": "list_devices"}
                      {"cmd": "toggle_led", "device_id": ...}
                      {"cmd": "reconnect", "device_id": ...}
+                     {"cmd": "set_mode", "device_id": ..., "mode": 0|1|2}
+                     {"cmd": "set_interval", "device_id": ..., "seconds": 0..30}
                      {"cmd": "enqueue_ota", "device_id": ..., "image_path": ..., "target_version": ...}
                      {"cmd": "confirm_device", "device_id": ...}   (health-check + confirm outside the OTA queue -
                                                                      e.g. a trial image left pending across an agent
@@ -106,6 +108,10 @@ class IpcServer:
                 self.fleet.toggle_led(msg["device_id"])
             elif cmd == "reconnect":
                 self.fleet.reconnect(msg["device_id"])
+            elif cmd == "set_mode":
+                await self.fleet.set_mode(msg["device_id"], int(msg["mode"]))
+            elif cmd == "set_interval":
+                await self.fleet.set_interval(msg["device_id"], int(msg["seconds"]))
             elif cmd == "enqueue_ota":
                 job_id = self.inventory.enqueue_ota(
                     msg["device_id"], msg["image_path"], msg.get("target_version")

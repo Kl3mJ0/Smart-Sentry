@@ -90,6 +90,9 @@ class AgentDriver:
             )
 
     def _apply_selected(self):
+        # Never carry the previous SS1's last values into another device card.
+        self.backend.set_temp_available(False)
+        self.backend.set_humidity_available(False)
         if self.device_id and self.device_id in self.devices:
             self._apply(self.devices[self.device_id])
         self._publish_device()
@@ -137,12 +140,20 @@ class AgentDriver:
         if not self._send_cmd("check_updates", include_device=False):
             self.backend.set_update_status("agent_offline", "Fleet agent is not ready yet; retry in a moment")
 
-    def _send_cmd(self, cmd: str, include_device=True):
+    def set_mode(self, mode: int):
+        self._send_cmd("set_mode", {"mode": int(mode)})
+
+    def set_interval(self, seconds: int):
+        self._send_cmd("set_interval", {"seconds": int(seconds)})
+
+    def _send_cmd(self, cmd: str, extra=None, include_device=True):
         if self._writer is None or (include_device and self.device_id is None):
             return False
         payload = {"cmd": cmd}
         if include_device:
             payload["device_id"] = self.device_id
+        if extra:
+            payload.update(extra)
         line = json.dumps(payload) + "\n"
         self._writer.write(line.encode())
         asyncio.create_task(self._drain_writer())

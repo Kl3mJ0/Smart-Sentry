@@ -26,13 +26,25 @@ class SentryBackend(QObject):
     deviceChanged = Signal()
     updateChanged = Signal()
     jobsChanged = Signal()
+    sensorConfigChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._conn_state = "scanning"
         self._reconnecting = False
-        self._temp = 23.51
-        self._humidity = 43.20
+        self._temp = 0.0
+        self._humidity = 0.0
+        self._temp_available = False
+        self._humidity_available = False
+        self._sensor_mode = 0
+        self._sensor_mode_name = "Unknown"
+        self._sample_interval = 0
+        self._sample_interval_ms = 500
+        self._sensor_kind = 0
+        self._sensor_kind_name = "None"
+        self._sensor_error = 1
+        self._sensor_error_text = "Sensor status unavailable"
+        self._mode_reboot_pending = False
         self._led_on = False
         self._last_update = "--:--:--"
         self._uptime_sec = 0
@@ -70,12 +82,16 @@ class SentryBackend(QObject):
 
     def set_temp(self, value: float):
         self._temp = value
+        self._temp_available = True
         self.tempChanged.emit()
+        self.sensorConfigChanged.emit()
         self._touch()
 
     def set_humidity(self, value: float):
         self._humidity = value
+        self._humidity_available = True
         self.humidityChanged.emit()
+        self.sensorConfigChanged.emit()
         self._touch()
 
     def set_led(self, on: bool):
@@ -88,6 +104,50 @@ class SentryBackend(QObject):
         if self._signal != level:
             self._signal = level
             self.signalChanged.emit()
+
+    def set_temp_available(self, value):
+        self._temp_available = bool(value)
+        self.sensorConfigChanged.emit()
+
+    def set_humidity_available(self, value):
+        self._humidity_available = bool(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sensor_mode(self, value):
+        self._sensor_mode = int(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sensor_mode_name(self, value):
+        self._sensor_mode_name = str(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sample_interval(self, value):
+        self._sample_interval = int(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sample_interval_ms(self, value):
+        self._sample_interval_ms = int(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sensor_kind(self, value):
+        self._sensor_kind = int(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sensor_kind_name(self, value):
+        self._sensor_kind_name = str(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sensor_error(self, value):
+        self._sensor_error = int(value)
+        self.sensorConfigChanged.emit()
+
+    def set_sensor_error_text(self, value):
+        self._sensor_error_text = str(value)
+        self.sensorConfigChanged.emit()
+
+    def set_mode_reboot_pending(self, value):
+        self._mode_reboot_pending = bool(value)
+        self.sensorConfigChanged.emit()
 
     def set_device(self, device_id: str, name: str, position: int, count: int, fw_version: str = "unknown"):
         self._device_id, self._device_name = device_id, name
@@ -146,6 +206,16 @@ class SentryBackend(QObject):
         if self.driver and hasattr(self.driver, "check_updates"):
             self.driver.check_updates()
 
+    @Slot(int)
+    def setSensorMode(self, mode):
+        if self.driver and hasattr(self.driver, "set_mode"):
+            self.driver.set_mode(mode)
+
+    @Slot(int)
+    def setSampleInterval(self, seconds):
+        if self.driver and hasattr(self.driver, "set_interval"):
+            self.driver.set_interval(seconds)
+
     @Slot()
     def cycleConnState(self):
         """Demo helper (status pill tap): only the fake driver honours it."""
@@ -168,6 +238,39 @@ class SentryBackend(QObject):
     @Property(float, notify=humidityChanged)
     def humidity(self):
         return self._humidity
+
+    @Property(bool, notify=sensorConfigChanged)
+    def tempAvailable(self): return self._temp_available
+
+    @Property(bool, notify=sensorConfigChanged)
+    def humidityAvailable(self): return self._humidity_available
+
+    @Property(int, notify=sensorConfigChanged)
+    def sensorMode(self): return self._sensor_mode
+
+    @Property(str, notify=sensorConfigChanged)
+    def sensorModeName(self): return self._sensor_mode_name
+
+    @Property(int, notify=sensorConfigChanged)
+    def sampleInterval(self): return self._sample_interval
+
+    @Property(int, notify=sensorConfigChanged)
+    def sampleIntervalMs(self): return self._sample_interval_ms
+
+    @Property(int, notify=sensorConfigChanged)
+    def sensorKind(self): return self._sensor_kind
+
+    @Property(str, notify=sensorConfigChanged)
+    def sensorKindName(self): return self._sensor_kind_name
+
+    @Property(int, notify=sensorConfigChanged)
+    def sensorError(self): return self._sensor_error
+
+    @Property(str, notify=sensorConfigChanged)
+    def sensorErrorText(self): return self._sensor_error_text
+
+    @Property(bool, notify=sensorConfigChanged)
+    def modeRebootPending(self): return self._mode_reboot_pending
 
     @Property(bool, notify=ledChanged)
     def ledOn(self):

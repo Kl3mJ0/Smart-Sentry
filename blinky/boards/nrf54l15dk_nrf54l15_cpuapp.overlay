@@ -4,10 +4,6 @@
  * use Zephyr's GPIO I2C controller for the low-rate SHT41 bus.
  */
 / {
-	chosen {
-		zephyr,console = &uart30;
-	};
-
 	prod_i2c: i2c-gpio-production {
 		compatible = "gpio-i2c";
 		status = "okay";
@@ -18,6 +14,28 @@
 		clock-frequency = <I2C_BITRATE_STANDARD>;
 	};
 
+	ext_i2c: i2c-gpio-external {
+		compatible = "gpio-i2c";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sda-gpios = <&gpio1 3 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		scl-gpios = <&gpio1 11 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		clock-frequency = <I2C_BITRATE_STANDARD>;
+	};
+
+	/* GPIO implementation avoids a static TWIM21 claim on P1.11, which is
+	 * also the external connector's SCL/thermistor ADC signal. */
+	dk_i2c: i2c-gpio-dk {
+		compatible = "gpio-i2c";
+		status = "okay";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sda-gpios = <&gpio1 11 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		scl-gpios = <&gpio1 12 (GPIO_OPEN_DRAIN | GPIO_PULL_UP)>;
+		clock-frequency = <I2C_BITRATE_STANDARD>;
+	};
+
 	/* Production SS1 switched sensor rail, active-high on P2.03. */
 	sensor_enable: sensor-enable {
 		compatible = "regulator-fixed";
@@ -25,6 +43,53 @@
 		enable-gpios = <&gpio2 3 GPIO_ACTIVE_HIGH>;
 	};
 
+	/*
+	 * Optional external 10 kOhm/B3950 NTC. The PCB's 10 kOhm pull-up is
+	 * already connected to EX_SCL_THERM2 (P1.11/AIN4); the attachment puts
+	 * the thermistor between that signal and ground.
+	 */
+	external_thermistor: thermistor-external {
+		compatible = "ntc-thermistor-generic";
+		status = "okay";
+		io-channels = <&adc 4>;
+		pullup-uv = <3300000>;
+		pullup-ohm = <10000>;
+		pulldown-ohm = <0>;
+		zephyr,compensation-table = <(-40) 401859>,
+			<(-30) 200203>,
+			<(-20) 105384>,
+			<(-10) 58245>,
+			<(0) 33620>,
+			<(10) 20174>,
+			<(20) 12535>,
+			<(30) 8037>,
+			<(40) 5301>,
+			<(50) 3588>,
+			<(60) 2486>,
+			<(70) 1759>,
+			<(80) 1270>,
+			<(90) 933>,
+			<(100) 697>,
+			<(110) 529>,
+			<(120) 407>;
+	};
+
+};
+
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN4>; /* P1.11 */
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
 };
 
 &pinctrl {
@@ -93,19 +158,11 @@
 
 /* DK I2C: SDA P1.11, SCL P1.12. */
 &i2c21 {
-	compatible = "nordic,nrf-twim";
-	status = "okay";
-	pinctrl-0 = <&i2c21_default>;
-	pinctrl-1 = <&i2c21_sleep>;
-	pinctrl-names = "default", "sleep";
-	clock-frequency = <I2C_BITRATE_STANDARD>;
+	status = "disabled";
 };
 
 &uart30 {
-	status = "okay";
-	pinctrl-0 = <&debug_uart30_default>;
-	pinctrl-1 = <&debug_uart30_sleep>;
-	pinctrl-names = "default", "sleep";
+	status = "disabled";
 };
 
 &uart20 {

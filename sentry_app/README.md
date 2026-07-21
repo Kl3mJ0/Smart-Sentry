@@ -148,6 +148,10 @@ Firmware on this branch advertises a permanent factory ID, certificate-gates
 MCUmgr, uses a local production MCUboot signing key, prevents downgrades and
 leaves every trial unconfirmed until the Pi observes 15 seconds of healthy,
 authenticated sensor data. Failed trials are rebooted into MCUboot rollback.
+
+The selected SS1's sensor configuration is available from **SENSOR MODE** on
+the dashboard. It controls Debug, Normal I2C and External Auto modes plus the
+0–30 second sampling interval. See [the sensor mode protocol](../docs/sensor-modes.md).
 Cloud release download is the remaining delivery-provider step; local files
 are deliberately used for hardware acceptance testing first.
 

@@ -98,6 +98,18 @@ class FleetManager:
         if session:
             session.reconnect()
 
+    async def set_mode(self, device_id: str, mode: int):
+        session = self.sessions.get(device_id)
+        if not session:
+            raise KeyError(f"unknown SS1 {device_id}")
+        await session.set_mode(mode)
+
+    async def set_interval(self, device_id: str, seconds: int):
+        session = self.sessions.get(device_id)
+        if not session:
+            raise KeyError(f"unknown SS1 {device_id}")
+        await session.set_interval(seconds)
+
     def list_devices(self) -> list[dict]:
         out = []
         for device_id, session in self.sessions.items():

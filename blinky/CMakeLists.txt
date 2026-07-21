@@ -6,4 +6,5 @@ project(blinky)
 
 target_sources(app PRIVATE src/main.c)
 target_sources(app PRIVATE src/sentry_auth.c)
+target_sources(app PRIVATE src/serial30_mux.c)
 target_sources_ifdef(CONFIG_BT_RAS_RRSP app PRIVATE src/cs_reflector.c)

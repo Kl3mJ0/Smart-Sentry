@@ -19,7 +19,7 @@
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
-#include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/hwinfo.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
@@ -35,11 +35,12 @@
 
 #include "sentry_auth.h"
 #include "cs_reflector.h"
+#include "serial30_mux.h"
 
 /* ---------------- Timing ---------------- */
 
-#define SAMPLE_PERIOD_MS 500
-#define NOTIFY_PERIOD_MS 1000
+#define FAST_SAMPLE_PERIOD_MS 500
+#define MAX_SAMPLE_INTERVAL_SECONDS 30
 #define BUTTON_DEBOUNCE_MS 250
 #define RECONNECT_QUIET_MS 1500
 
@@ -49,41 +50,66 @@
 /* ---------------- I2C / SHT3x ---------------- */
 
 #define PROD_I2C_NODE DT_NODELABEL(prod_i2c)
-#define DK_I2C_NODE   DT_NODELABEL(i2c21)
-#define DEBUG_UART_NODE DT_NODELABEL(uart30)
+#define DK_I2C_NODE   DT_NODELABEL(dk_i2c)
+#define EXT_I2C_NODE  DT_NODELABEL(ext_i2c)
+#define EXT_THERMISTOR_NODE DT_NODELABEL(external_thermistor)
 #define SHT3X_ADDR_PRIMARY   0x44
 #define SHT3X_ADDR_ALTERNATE 0x45
 
-static const struct device *const i2c_candidates[] = {
-	DEVICE_DT_GET(PROD_I2C_NODE),
-	DEVICE_DT_GET(DK_I2C_NODE),
-};
-static const struct device *i2c_dev;
-static const struct device *const debug_uart = DEVICE_DT_GET(DEBUG_UART_NODE);
-enum sensor_kind {
-	SENSOR_NONE,
-	SENSOR_SHT3X,
-	SENSOR_SHT4X,
+static const struct device *const prod_i2c = DEVICE_DT_GET(PROD_I2C_NODE);
+static const struct device *const dk_i2c = DEVICE_DT_GET(DK_I2C_NODE);
+static const struct device *const ext_i2c = DEVICE_DT_GET(EXT_I2C_NODE);
+static const struct device *const ext_thermistor = DEVICE_DT_GET(EXT_THERMISTOR_NODE);
+
+enum operating_mode {
+	MODE_DEBUG = 0,
+	MODE_NORMAL_I2C = 1,
+	MODE_EXTERNAL_AUTO = 2,
 };
 
+enum sensor_kind {
+	SENSOR_NONE = 0,
+	SENSOR_SHT3X = 1,
+	SENSOR_SHT4X_INTERNAL = 2,
+	SENSOR_SHT4X_EXTERNAL = 3,
+	SENSOR_THERMISTOR = 4,
+};
+
+enum sensor_error {
+	SENSOR_ERROR_OK = 0,
+	SENSOR_ERROR_NOT_FOUND = 1,
+	SENSOR_ERROR_BUS = 2,
+	SENSOR_ERROR_CRC = 3,
+	SENSOR_ERROR_ADC = 4,
+	SENSOR_ERROR_HUMIDITY_UNAVAILABLE = 5,
+};
+
+static enum operating_mode operating_mode = MODE_DEBUG;
+static uint8_t sample_interval_seconds;
 static bool sensor_ready;
 static enum sensor_kind sensor_kind;
+static enum sensor_error sensor_error = SENSOR_ERROR_NOT_FOUND;
 static uint16_t sensor_addr = SHT3X_ADDR_PRIMARY;
+static const struct device *i2c_dev;
+static bool serial30_twim_active;
+static bool temp_valid;
+static bool hum_valid;
+static bool mode_reboot_pending;
 
 static int debug_uart_char_out(int c)
 {
 	/* A raw UART hook does not perform the console's LF-to-CRLF conversion. */
 	if (c == '\n') {
-		uart_poll_out(debug_uart, '\r');
+		serial30_uart_putc('\r');
 	}
-	uart_poll_out(debug_uart, (unsigned char)c);
+	serial30_uart_putc(c);
 	return c;
 }
 
 static void debug_uart_force_console(void)
 {
-	if (device_is_ready(debug_uart)) {
-		/* Ensure printk always targets the production board's soldered TX. */
+	if (operating_mode == MODE_DEBUG && serial30_uart_init() == 0) {
+		/* Debug mode owns SERIAL30 as UARTE30 on the soldered P0.00 TX. */
 		__printk_hook_install(debug_uart_char_out);
 	}
 }
@@ -138,6 +164,68 @@ static uint8_t led_state;
 
 static volatile bool maint_button_pending;
 
+static uint32_t sample_period_ms(void)
+{
+	return sample_interval_seconds == 0 ? FAST_SAMPLE_PERIOD_MS :
+		(uint32_t)sample_interval_seconds * 1000U;
+}
+
+static const char *operating_mode_name(enum operating_mode mode)
+{
+	switch (mode) {
+	case MODE_DEBUG:
+		return "Debug UART + GPIO I2C";
+	case MODE_NORMAL_I2C:
+		return "Normal TWIM30";
+	case MODE_EXTERNAL_AUTO:
+		return "External auto-detect";
+	default:
+		return "Invalid";
+	}
+}
+
+static int app_settings_set(const char *name, size_t len,
+			    settings_read_cb read_cb, void *cb_arg)
+{
+	uint8_t value;
+	int ret;
+
+	if (len != sizeof(value)) {
+		return -EINVAL;
+	}
+	ret = read_cb(cb_arg, &value, sizeof(value));
+	if (ret < 0) {
+		return ret;
+	}
+
+	if (strcmp(name, "mode") == 0) {
+		if (value > MODE_EXTERNAL_AUTO) {
+			return -EINVAL;
+		}
+		operating_mode = (enum operating_mode)value;
+		return 0;
+	}
+	if (strcmp(name, "interval") == 0) {
+		if (value > MAX_SAMPLE_INTERVAL_SECONDS) {
+			return -EINVAL;
+		}
+		sample_interval_seconds = value;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(ss1_app, "ss1", NULL, app_settings_set,
+			       NULL, NULL);
+
+static void mode_reboot_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
+static K_WORK_DELAYABLE_DEFINE(mode_reboot_work, mode_reboot_work_handler);
+
 /* ---------------- Multiple connection state ---------------- */
 
 static struct bt_conn *connections[CONFIG_BT_MAX_CONN];
@@ -180,11 +268,29 @@ static struct bt_uuid_16 ess_hum_uuid =
 #define BT_UUID_SENTRY_LED_VAL \
 	BT_UUID_128_ENCODE(0x7e8f0002, 0x1111, 0x2222, 0x3333, 0x123456789abc)
 
+#define BT_UUID_SENTRY_MODE_VAL \
+	BT_UUID_128_ENCODE(0x7e8f0003, 0x1111, 0x2222, 0x3333, 0x123456789abc)
+
+#define BT_UUID_SENTRY_INTERVAL_VAL \
+	BT_UUID_128_ENCODE(0x7e8f0004, 0x1111, 0x2222, 0x3333, 0x123456789abc)
+
+#define BT_UUID_SENTRY_STATUS_VAL \
+	BT_UUID_128_ENCODE(0x7e8f0005, 0x1111, 0x2222, 0x3333, 0x123456789abc)
+
 static struct bt_uuid_128 sentry_service_uuid =
 	BT_UUID_INIT_128(BT_UUID_SENTRY_SERVICE_VAL);
 
 static struct bt_uuid_128 sentry_led_uuid =
 	BT_UUID_INIT_128(BT_UUID_SENTRY_LED_VAL);
+
+static struct bt_uuid_128 sentry_mode_uuid =
+	BT_UUID_INIT_128(BT_UUID_SENTRY_MODE_VAL);
+
+static struct bt_uuid_128 sentry_interval_uuid =
+	BT_UUID_INIT_128(BT_UUID_SENTRY_INTERVAL_VAL);
+
+static struct bt_uuid_128 sentry_status_uuid =
+	BT_UUID_INIT_128(BT_UUID_SENTRY_STATUS_VAL);
 
 /* ---------------- Forward declarations ---------------- */
 
@@ -375,6 +481,9 @@ static ssize_t read_temp_cb(struct bt_conn *conn,
 	if (!sentry_auth_is_authenticated(conn)) {
 		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
 	}
+	if (!temp_valid) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
 
 	ARG_UNUSED(attr);
 
@@ -404,6 +513,9 @@ static ssize_t read_hum_cb(struct bt_conn *conn,
 
 	if (!sentry_auth_is_authenticated(conn)) {
 		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+	if (!hum_valid) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
 
 	ARG_UNUSED(attr);
@@ -485,6 +597,132 @@ static void led_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	       value == BT_GATT_CCC_NOTIFY ? "enabled" : "disabled");
 }
 
+struct sensor_status_value {
+	uint8_t mode;
+	uint8_t sensor_kind;
+	uint8_t flags;
+	uint8_t error;
+	uint16_t interval_ms_le;
+	uint16_t reserved_le;
+} __packed;
+
+#define STATUS_TEMP_VALID BIT(0)
+#define STATUS_HUM_VALID BIT(1)
+#define STATUS_REBOOT_PENDING BIT(2)
+
+static ssize_t read_mode_cb(struct bt_conn *conn,
+			    const struct bt_gatt_attr *attr, void *buf,
+			    uint16_t len, uint16_t offset)
+{
+	uint8_t value = (uint8_t)operating_mode;
+
+	if (!sentry_auth_is_authenticated(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, &value, sizeof(value));
+}
+
+static ssize_t write_mode_cb(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr, const void *buf,
+			     uint16_t len, uint16_t offset, uint8_t flags)
+{
+	uint8_t value;
+	int ret;
+
+	ARG_UNUSED(attr);
+	ARG_UNUSED(flags);
+	if (!sentry_auth_is_authenticated(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+	if (offset != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (len != 1) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	value = *(const uint8_t *)buf;
+	if (value > MODE_EXTERNAL_AUTO) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+	if (value == (uint8_t)operating_mode) {
+		return len;
+	}
+
+	ret = settings_save_one("ss1/mode", &value, sizeof(value));
+	if (ret != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+	}
+	mode_reboot_pending = true;
+	printk("Mode change saved: %u; rebooting to transfer SERIAL30 ownership\n", value);
+	k_work_reschedule(&mode_reboot_work, K_MSEC(750));
+	return len;
+}
+
+static ssize_t read_interval_cb(struct bt_conn *conn,
+				const struct bt_gatt_attr *attr, void *buf,
+				uint16_t len, uint16_t offset)
+{
+	uint8_t value = sample_interval_seconds;
+
+	if (!sentry_auth_is_authenticated(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, &value, sizeof(value));
+}
+
+static ssize_t write_interval_cb(struct bt_conn *conn,
+				 const struct bt_gatt_attr *attr, const void *buf,
+				 uint16_t len, uint16_t offset, uint8_t flags)
+{
+	uint8_t value;
+	int ret;
+
+	ARG_UNUSED(attr);
+	ARG_UNUSED(flags);
+	if (!sentry_auth_is_authenticated(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+	if (offset != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+	if (len != 1) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+	}
+	value = *(const uint8_t *)buf;
+	if (value > MAX_SAMPLE_INTERVAL_SECONDS) {
+		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
+	}
+
+	ret = settings_save_one("ss1/interval", &value, sizeof(value));
+	if (ret != 0) {
+		return BT_GATT_ERR(BT_ATT_ERR_UNLIKELY);
+	}
+	sample_interval_seconds = value;
+	printk("Sampling interval changed to %u ms\n", sample_period_ms());
+	return len;
+}
+
+static ssize_t read_sensor_status_cb(struct bt_conn *conn,
+				     const struct bt_gatt_attr *attr, void *buf,
+				     uint16_t len, uint16_t offset)
+{
+	struct sensor_status_value value = {
+		.mode = (uint8_t)operating_mode,
+		.sensor_kind = (uint8_t)sensor_kind,
+		.flags = (temp_valid ? STATUS_TEMP_VALID : 0) |
+			 (hum_valid ? STATUS_HUM_VALID : 0) |
+			 (mode_reboot_pending ? STATUS_REBOOT_PENDING : 0),
+		.error = (uint8_t)sensor_error,
+		.interval_ms_le = sys_cpu_to_le16((uint16_t)sample_period_ms()),
+		.reserved_le = 0,
+	};
+
+	if (!sentry_auth_is_authenticated(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHENTICATION);
+	}
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, &value, sizeof(value));
+}
+
 static ssize_t read_firmware_revision_cb(struct bt_conn *conn,
 					 const struct bt_gatt_attr *attr,
 					 void *buf, uint16_t len, uint16_t offset)
@@ -551,6 +789,24 @@ BT_GATT_SERVICE_DEFINE(sentry_svc,
 	BT_GATT_CCC(led_ccc_changed,
 		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
 	BT_GATT_CUD("LED Control / Maintenance State", BT_GATT_PERM_READ),
+
+	BT_GATT_CHARACTERISTIC(&sentry_mode_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT,
+			       read_mode_cb, write_mode_cb, NULL),
+	BT_GATT_CUD("Operating Mode (0 Debug, 1 I2C, 2 External)", BT_GATT_PERM_READ),
+
+	BT_GATT_CHARACTERISTIC(&sentry_interval_uuid.uuid,
+			       BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT,
+			       read_interval_cb, write_interval_cb, NULL),
+	BT_GATT_CUD("Sampling Interval Seconds (0 = 500 ms)", BT_GATT_PERM_READ),
+
+	BT_GATT_CHARACTERISTIC(&sentry_status_uuid.uuid,
+			       BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ_ENCRYPT,
+			       read_sensor_status_cb, NULL, NULL),
+	BT_GATT_CUD("Sensor Capability and Error Status", BT_GATT_PERM_READ),
 );
 
 BT_GATT_SERVICE_DEFINE(device_info_svc,
@@ -807,22 +1063,36 @@ static uint8_t sht3x_crc8(const uint8_t *data, int len)
 	return crc;
 }
 
-static int16_t fake_temp_cdeg(void)
-{
-	static int16_t fake = 2400;
-
-	fake += 5;
-
-	if (fake > 2800) {
-		fake = 2400;
-	}
-
-	return fake;
-}
-
 static const char *sensor_kind_name(enum sensor_kind kind)
 {
-	return kind == SENSOR_SHT4X ? "SHT4x" : "SHT3x";
+	switch (kind) {
+	case SENSOR_SHT3X:
+		return "SHT3x";
+	case SENSOR_SHT4X_INTERNAL:
+		return "Onboard SHT4x";
+	case SENSOR_SHT4X_EXTERNAL:
+		return "External SHT4x";
+	case SENSOR_THERMISTOR:
+		return "External 10k B3950 thermistor";
+	default:
+		return "No sensor";
+	}
+}
+
+static int sensor_bus_write(uint16_t address, const uint8_t *data, size_t length)
+{
+	if (serial30_twim_active) {
+		return serial30_twim_write(address, data, length);
+	}
+	return i2c_write(i2c_dev, data, length, address);
+}
+
+static int sensor_bus_read(uint16_t address, uint8_t *data, size_t length)
+{
+	if (serial30_twim_active) {
+		return serial30_twim_read(address, data, length);
+	}
+	return i2c_read(i2c_dev, data, length, address);
 }
 
 static bool read_sensor_sample(int16_t *out_temp_cdeg,
@@ -842,13 +1112,39 @@ static bool read_sensor_sample(int16_t *out_temp_cdeg,
 	int32_t hum_cpercent;
 
 	if (!sensor_ready) {
-		printk("Temperature sensor not ready. Using fake temp.\n");
-		*out_temp_cdeg = fake_temp_cdeg();
-		*out_hum_cpercent = 0;
+		temp_valid = false;
+		hum_valid = false;
+		sensor_error = SENSOR_ERROR_NOT_FOUND;
+		printk("Sensor unavailable; no measurement published\n");
 		return false;
 	}
 
-	if (sensor_kind == SENSOR_SHT4X) {
+	if (sensor_kind == SENSOR_THERMISTOR) {
+		struct sensor_value temperature;
+
+		ret = sensor_sample_fetch(ext_thermistor);
+		if (ret == 0) {
+			ret = sensor_channel_get(ext_thermistor,
+						 SENSOR_CHAN_AMBIENT_TEMP, &temperature);
+		}
+		if (ret != 0) {
+			temp_valid = false;
+			hum_valid = false;
+			sensor_error = SENSOR_ERROR_ADC;
+			printk("External thermistor read failed: %d; no measurement published\n", ret);
+			return false;
+		}
+
+		*out_temp_cdeg = (int16_t)(temperature.val1 * 100 +
+						 temperature.val2 / 10000);
+		temp_valid = true;
+		hum_valid = false;
+		sensor_error = SENSOR_ERROR_HUMIDITY_UNAVAILABLE;
+		return true;
+	}
+
+	if (sensor_kind == SENSOR_SHT4X_INTERNAL ||
+	    sensor_kind == SENSOR_SHT4X_EXTERNAL) {
 		cmd = &sht4x_cmd;
 		cmd_len = sizeof(sht4x_cmd);
 	} else {
@@ -856,23 +1152,25 @@ static bool read_sensor_sample(int16_t *out_temp_cdeg,
 		cmd_len = sizeof(sht3x_cmd);
 	}
 
-	ret = i2c_write(i2c_dev, cmd, cmd_len, sensor_addr);
+	ret = sensor_bus_write(sensor_addr, cmd, cmd_len);
 	if (ret != 0) {
-		printk("%s measurement command failed: %d. Using fake temp.\n",
+		printk("%s measurement command failed: %d; no measurement published\n",
 		       sensor_kind_name(sensor_kind), ret);
-		*out_temp_cdeg = fake_temp_cdeg();
-		*out_hum_cpercent = 0;
+		temp_valid = false;
+		hum_valid = false;
+		sensor_error = SENSOR_ERROR_BUS;
 		return false;
 	}
 
 	k_msleep(20);
 
-	ret = i2c_read(i2c_dev, rx, sizeof(rx), sensor_addr);
+	ret = sensor_bus_read(sensor_addr, rx, sizeof(rx));
 	if (ret != 0) {
-		printk("%s read failed: %d. Using fake temp.\n",
+		printk("%s read failed: %d; no measurement published\n",
 		       sensor_kind_name(sensor_kind), ret);
-		*out_temp_cdeg = fake_temp_cdeg();
-		*out_hum_cpercent = 0;
+		temp_valid = false;
+		hum_valid = false;
+		sensor_error = SENSOR_ERROR_BUS;
 		return false;
 	}
 
@@ -880,18 +1178,20 @@ static bool read_sensor_sample(int16_t *out_temp_cdeg,
 	hum_crc = sht3x_crc8(&rx[3], 2);
 
 	if (temp_crc != rx[2]) {
-		printk("%s temperature CRC failed. Using fake temp.\n",
+		printk("%s temperature CRC failed; no measurement published\n",
 		       sensor_kind_name(sensor_kind));
-		*out_temp_cdeg = fake_temp_cdeg();
-		*out_hum_cpercent = 0;
+		temp_valid = false;
+		hum_valid = false;
+		sensor_error = SENSOR_ERROR_CRC;
 		return false;
 	}
 
 	if (hum_crc != rx[5]) {
-		printk("%s humidity CRC failed. Using fake temp.\n",
+		printk("%s humidity CRC failed; no measurement published\n",
 		       sensor_kind_name(sensor_kind));
-		*out_temp_cdeg = fake_temp_cdeg();
-		*out_hum_cpercent = 0;
+		temp_valid = false;
+		hum_valid = false;
+		sensor_error = SENSOR_ERROR_CRC;
 		return false;
 	}
 
@@ -899,7 +1199,8 @@ static bool read_sensor_sample(int16_t *out_temp_cdeg,
 	raw_hum = ((uint16_t)rx[3] << 8) | rx[4];
 
 	temp_cdeg = -4500 + (int32_t)(((int64_t)17500 * raw_temp) / 65535);
-	if (sensor_kind == SENSOR_SHT4X) {
+	if (sensor_kind == SENSOR_SHT4X_INTERNAL ||
+	    sensor_kind == SENSOR_SHT4X_EXTERNAL) {
 		hum_cpercent = -600 + (int32_t)(((int64_t)12500 * raw_hum) / 65535);
 		hum_cpercent = CLAMP(hum_cpercent, 0, 10000);
 	} else {
@@ -908,6 +1209,9 @@ static bool read_sensor_sample(int16_t *out_temp_cdeg,
 
 	*out_temp_cdeg = (int16_t)temp_cdeg;
 	*out_hum_cpercent = (uint16_t)hum_cpercent;
+	temp_valid = true;
+	hum_valid = true;
+	sensor_error = SENSOR_ERROR_OK;
 
 	return true;
 }
@@ -915,7 +1219,7 @@ static bool read_sensor_sample(int16_t *out_temp_cdeg,
 static void update_sensor_averages(void)
 {
 	int16_t temp_sample;
-	uint16_t hum_sample;
+	uint16_t hum_sample = 0;
 
 	int32_t temp_sum = 0;
 	uint32_t hum_sum = 0;
@@ -923,7 +1227,9 @@ static void update_sensor_averages(void)
 	uint8_t temp_count;
 	uint8_t hum_count;
 
-	read_sensor_sample(&temp_sample, &hum_sample);
+	if (!read_sensor_sample(&temp_sample, &hum_sample)) {
+		return;
+	}
 
 	temp_samples_cdeg[temp_sample_index] = temp_sample;
 	temp_sample_index = (temp_sample_index + 1) % TEMP_AVG_WINDOW_SAMPLES;
@@ -940,31 +1246,34 @@ static void update_sensor_averages(void)
 
 	temp_avg_cdeg = (int16_t)(temp_sum / temp_count);
 
-	hum_samples_cpercent[hum_sample_index] = hum_sample;
-	hum_sample_index = (hum_sample_index + 1) % HUM_AVG_WINDOW_SAMPLES;
+	if (hum_valid) {
+		hum_samples_cpercent[hum_sample_index] = hum_sample;
+		hum_sample_index = (hum_sample_index + 1) % HUM_AVG_WINDOW_SAMPLES;
 
-	if (hum_sample_count < HUM_AVG_WINDOW_SAMPLES) {
-		hum_sample_count++;
+		if (hum_sample_count < HUM_AVG_WINDOW_SAMPLES) {
+			hum_sample_count++;
+		}
+
+		hum_count = hum_sample_count;
+		for (uint8_t i = 0; i < hum_count; i++) {
+			hum_sum += hum_samples_cpercent[i];
+		}
+		hum_avg_cpercent = (uint16_t)(hum_sum / hum_count);
+
+		printk("%s temp: %d.%02d C, avg: %d.%02d C | humidity: %u.%02u %%RH, avg: %u.%02u %%RH\n",
+		       sensor_kind_name(sensor_kind), temp_sample / 100,
+		       temp_sample < 0 ? -(temp_sample % 100) : temp_sample % 100,
+		       temp_avg_cdeg / 100,
+		       temp_avg_cdeg < 0 ? -(temp_avg_cdeg % 100) : temp_avg_cdeg % 100,
+		       hum_sample / 100, hum_sample % 100,
+		       hum_avg_cpercent / 100, hum_avg_cpercent % 100);
+	} else {
+		printk("%s temp: %d.%02d C, avg: %d.%02d C | humidity unavailable\n",
+		       sensor_kind_name(sensor_kind), temp_sample / 100,
+		       temp_sample < 0 ? -(temp_sample % 100) : temp_sample % 100,
+		       temp_avg_cdeg / 100,
+		       temp_avg_cdeg < 0 ? -(temp_avg_cdeg % 100) : temp_avg_cdeg % 100);
 	}
-
-	hum_count = hum_sample_count;
-
-	for (uint8_t i = 0; i < hum_count; i++) {
-		hum_sum += hum_samples_cpercent[i];
-	}
-
-	hum_avg_cpercent = (uint16_t)(hum_sum / hum_count);
-
-	printk("%s temp: %d.%02d C, temp avg: %d.%02d C | humidity: %u.%02u %%RH, humidity avg: %u.%02u %%RH\n",
-	       sensor_kind_name(sensor_kind),
-	       temp_sample / 100,
-	       temp_sample < 0 ? -(temp_sample % 100) : temp_sample % 100,
-	       temp_avg_cdeg / 100,
-	       temp_avg_cdeg < 0 ? -(temp_avg_cdeg % 100) : temp_avg_cdeg % 100,
-	       hum_sample / 100,
-	       hum_sample % 100,
-	       hum_avg_cpercent / 100,
-	       hum_avg_cpercent % 100);
 }
 
 /* ---------------- BLE notify helpers ---------------- */
@@ -974,6 +1283,9 @@ static void notify_temperature(void)
 	int err;
 	int16_t value_le;
 
+	if (!temp_valid) {
+		return;
+	}
 	value_le = (int16_t)sys_cpu_to_le16((uint16_t)temp_avg_cdeg);
 
 	for (int i = 0; i < CONFIG_BT_MAX_CONN; i++) {
@@ -1007,6 +1319,9 @@ static void notify_humidity(void)
 	int err;
 	uint16_t value_le;
 
+	if (!hum_valid) {
+		return;
+	}
 	value_le = sys_cpu_to_le16(hum_avg_cpercent);
 
 	for (int i = 0; i < CONFIG_BT_MAX_CONN; i++) {
@@ -1151,81 +1466,104 @@ static int gpio_init_all(void)
 
 static void sensor_init_check(void)
 {
-	static const uint16_t addresses[] = {
-		SHT3X_ADDR_PRIMARY,
-		SHT3X_ADDR_ALTERNATE,
-	};
+	static const uint16_t dk_addresses[] = {0x44, 0x45};
 	const uint8_t sht3x_cmd[2] = {0x24, 0x00};
 	const uint8_t sht4x_cmd = 0xFD;
 	uint8_t rx[6];
-
-	for (size_t bus = 0; bus < ARRAY_SIZE(i2c_candidates); bus++) {
-		const struct device *candidate = i2c_candidates[bus];
-		enum sensor_kind candidate_kind = bus == 0 ? SENSOR_SHT4X : SENSOR_SHT3X;
-		const uint8_t *cmd = candidate_kind == SENSOR_SHT4X ?
-			&sht4x_cmd : sht3x_cmd;
-		size_t cmd_len = candidate_kind == SENSOR_SHT4X ?
-			sizeof(sht4x_cmd) : sizeof(sht3x_cmd);
-
-		if (!device_is_ready(candidate)) {
-			printk("I2C bus %s is not ready\n", candidate->name);
-			continue;
-		}
-
-		printk("Probing %s on I2C bus %s (%s wiring)\n",
-		       sensor_kind_name(candidate_kind), candidate->name,
-		       bus == 0 ? "production P0.04/P0.03" : "DK P1.11/P1.12");
-
-		int recovery_ret = i2c_recover_bus(candidate);
-		printk("I2C bus recovery on %s: %d\n", candidate->name, recovery_ret);
-
-		for (size_t i = 0; i < ARRAY_SIZE(addresses); i++) {
-			uint16_t address = addresses[i];
-
-			/* The production SHT41 has a fixed 0x44 address. */
-			if (candidate_kind == SENSOR_SHT4X &&
-			    address != SHT3X_ADDR_PRIMARY) {
-				continue;
-			}
-
-			printk("Probing %s address 0x%02X\n",
-			       sensor_kind_name(candidate_kind), address);
-			int write_ret = i2c_write(candidate, cmd, cmd_len, address);
-			if (write_ret != 0) {
-				printk("%s 0x%02X command failed: %d\n",
-				       sensor_kind_name(candidate_kind), address, write_ret);
-				continue;
-			}
-			k_msleep(20);
-			int read_ret = i2c_read(candidate, rx, sizeof(rx), address);
-			if (read_ret != 0) {
-				printk("%s 0x%02X read failed: %d\n",
-				       sensor_kind_name(candidate_kind), address, read_ret);
-				continue;
-			}
-			if (sht3x_crc8(&rx[0], 2) != rx[2] ||
-			    sht3x_crc8(&rx[3], 2) != rx[5]) {
-				printk("%s 0x%02X replied with invalid CRC\n",
-				       sensor_kind_name(candidate_kind), address);
-				continue;
-			}
-
-			i2c_dev = candidate;
-			sensor_addr = address;
-			sensor_kind = candidate_kind;
-			sensor_ready = true;
-			printk("Detected %s on %s at address 0x%02X\n",
-			       sensor_kind_name(sensor_kind), i2c_dev->name,
-			       sensor_addr);
-			printk("Sensor provides temperature and humidity over BLE\n");
-			return;
-		}
-	}
+	int ret;
 
 	sensor_ready = false;
 	sensor_kind = SENSOR_NONE;
-	printk("No supported temperature sensor found at 0x%02X or 0x%02X. Using fake temperature.\n",
-	       SHT3X_ADDR_PRIMARY, SHT3X_ADDR_ALTERNATE);
+	sensor_error = SENSOR_ERROR_NOT_FOUND;
+	temp_valid = false;
+	hum_valid = false;
+	serial30_twim_active = false;
+
+	/* Local helper implemented as a macro to keep all probing on the selected
+	 * backend. A valid CRC is required; an ACK by itself is not detection. */
+#define PROBE_SELECTED(_kind, _address, _cmd, _cmd_len) \
+	(sensor_bus_write((_address), (_cmd), (_cmd_len)) == 0 && \
+	 (k_msleep(20), sensor_bus_read((_address), rx, sizeof(rx))) == 0 && \
+	 sht3x_crc8(&rx[0], 2) == rx[2] && sht3x_crc8(&rx[3], 2) == rx[5])
+
+	if (operating_mode == MODE_DEBUG) {
+		if (device_is_ready(prod_i2c)) {
+			i2c_dev = prod_i2c;
+			(void)i2c_recover_bus(i2c_dev);
+			if (PROBE_SELECTED(SENSOR_SHT4X_INTERNAL, 0x44,
+					   &sht4x_cmd, sizeof(sht4x_cmd))) {
+				sensor_kind = SENSOR_SHT4X_INTERNAL;
+				sensor_addr = 0x44;
+				sensor_ready = true;
+			}
+		}
+	} else if (operating_mode == MODE_NORMAL_I2C) {
+		ret = serial30_twim_init();
+		if (ret == 0) {
+			serial30_twim_active = true;
+			if (PROBE_SELECTED(SENSOR_SHT4X_INTERNAL, 0x44,
+					   &sht4x_cmd, sizeof(sht4x_cmd))) {
+				sensor_kind = SENSOR_SHT4X_INTERNAL;
+				sensor_addr = 0x44;
+				sensor_ready = true;
+			}
+		}
+	} else {
+		if (device_is_ready(ext_i2c)) {
+			i2c_dev = ext_i2c;
+			(void)i2c_recover_bus(i2c_dev);
+			if (PROBE_SELECTED(SENSOR_SHT4X_EXTERNAL, 0x44,
+					   &sht4x_cmd, sizeof(sht4x_cmd))) {
+				sensor_kind = SENSOR_SHT4X_EXTERNAL;
+				sensor_addr = 0x44;
+				sensor_ready = true;
+			}
+		}
+
+		if (!sensor_ready && device_is_ready(ext_thermistor)) {
+			struct sensor_value temperature;
+
+			ret = sensor_sample_fetch(ext_thermistor);
+			if (ret == 0) {
+				ret = sensor_channel_get(ext_thermistor,
+							 SENSOR_CHAN_AMBIENT_TEMP,
+							 &temperature);
+			}
+			if (ret == 0) {
+				sensor_kind = SENSOR_THERMISTOR;
+				sensor_ready = true;
+				sensor_error = SENSOR_ERROR_HUMIDITY_UNAVAILABLE;
+			}
+		}
+	}
+
+	/* The DK's onboard SHT3x remains supported by the same image. It is only
+	 * considered for onboard modes, never as an external auto-detect result. */
+	if (!sensor_ready && operating_mode != MODE_EXTERNAL_AUTO &&
+	    device_is_ready(dk_i2c)) {
+		serial30_twim_active = false;
+		i2c_dev = dk_i2c;
+		(void)i2c_recover_bus(i2c_dev);
+		for (size_t i = 0; i < ARRAY_SIZE(dk_addresses); i++) {
+			if (PROBE_SELECTED(SENSOR_SHT3X, dk_addresses[i],
+					   sht3x_cmd, sizeof(sht3x_cmd))) {
+				sensor_kind = SENSOR_SHT3X;
+				sensor_addr = dk_addresses[i];
+				sensor_ready = true;
+				break;
+			}
+		}
+	}
+
+#undef PROBE_SELECTED
+
+	if (sensor_ready) {
+		printk("Detected %s; measurements will be published only when valid\n",
+		       sensor_kind_name(sensor_kind));
+	} else {
+		printk("No sensor valid for mode %s; BLE status reports unavailable\n",
+		       operating_mode_name(operating_mode));
+	}
 }
 
 /* ---------------- main ---------------- */
@@ -1234,12 +1572,24 @@ int main(void)
 {
 	int ret;
 	int64_t last_sample_ms;
-	int64_t last_notify_ms;
 	int64_t last_maint_button_ms = 0;
 
+	/* Load just our mode before touching SERIAL30. The complete settings load
+	 * remains after bt_enable(), once Bluetooth has registered its handlers. */
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		ret = settings_subsys_init();
+		if (ret == 0) {
+			ret = settings_load_subtree("ss1");
+		}
+		if (ret != 0) {
+			operating_mode = MODE_DEBUG;
+			sample_interval_seconds = 0;
+		}
+	}
 	debug_uart_force_console();
 	printk("\n\nMAIN STARTED - SS1 firmware %s\n", APP_VERSION_STRING);
-	printk("OTA validation marker: forced UART30 with CRLF + production GPIO I2C 1.0.15 is running\n");
+	printk("Mode: %s; interval: %u ms\n",
+	       operating_mode_name(operating_mode), sample_period_ms());
 
 	ret = init_permanent_device_name();
 	if (ret) {
@@ -1255,6 +1605,7 @@ int main(void)
 	}
 
 	sensor_init_check();
+	update_sensor_averages();
 
 	set_led_state(0, false);
 
@@ -1303,19 +1654,14 @@ int main(void)
 	printk("OTA image state: %s; awaiting Pi health confirmation when pending\n",
 	       boot_is_img_confirmed() ? "confirmed" : "trial/unconfirmed");
 
-	last_sample_ms = k_uptime_get();
-	last_notify_ms = k_uptime_get();
+	last_sample_ms = k_uptime_get() - sample_period_ms();
 
 	while (1) {
 		int64_t now = k_uptime_get();
 
-		if ((now - last_sample_ms) >= SAMPLE_PERIOD_MS) {
+		if ((now - last_sample_ms) >= sample_period_ms()) {
 			last_sample_ms = now;
 			update_sensor_averages();
-		}
-
-		if ((now - last_notify_ms) >= NOTIFY_PERIOD_MS) {
-			last_notify_ms = now;
 			notify_temperature();
 			notify_humidity();
 		}

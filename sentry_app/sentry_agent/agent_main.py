@@ -58,7 +58,7 @@ def acquire_instance_lock():
 
 # Production health check after a trial-boot: the device must reconnect on its own
 # (proves BLE/cert-auth still work post-flash) and keep streaming fresh
-# temp+humidity for HEALTH_CHECK_STABLE_S straight, within
+# every capability it advertises for HEALTH_CHECK_STABLE_S straight, within
 # HEALTH_CHECK_TIMEOUT_S of the reset. The agent confirms only after this
 # passes. Failed trials remain unconfirmed and are rebooted for MCUboot
 # rollback; see docs/ota-auth-and-device-id.md.
@@ -143,11 +143,12 @@ async def _wait_for_healthy(fleet: FleetManager, device_id: str) -> bool:
         stable_since = None
         while loop.time() < deadline:
             state = fleet.state.get(device_id, {})
+            humidity_required = state.get("humidity_available", True)
             healthy_now = (
                 state.get("conn_state") == "secure"
                 and not state.get("reconnecting")
                 and fresh_temp.is_set()
-                and fresh_humidity.is_set()
+                and (fresh_humidity.is_set() if humidity_required else True)
             )
             if healthy_now:
                 stable_since = stable_since or loop.time()

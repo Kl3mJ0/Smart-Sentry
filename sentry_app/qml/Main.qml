@@ -13,6 +13,7 @@ Window {
     color: "#050709"
     title: "Smart Sentry"
     property bool updatePanelOpen: false
+    property bool configPanelOpen: false
 
     // ---- connection-state styling (from design CONN_CONFIG) --------------
     readonly property var connCfg: ({
@@ -43,7 +44,8 @@ Window {
     property var history: []
     function pushSample() {
         var h = history.slice(-29)
-        h.push({ temp: sentry.temp, hum: sentry.humidity })
+        h.push({ temp: sentry.tempAvailable ? sentry.temp : null,
+                 hum: sentry.humidityAvailable ? sentry.humidity : null })
         history = h
         chart.requestPaint()
     }
@@ -52,15 +54,7 @@ Window {
         running: sentry.connState === "secure" && !sentry.reconnecting
         onTriggered: root.pushSample()
     }
-    Component.onCompleted: {
-        var h = [], t = sentry.temp, u = sentry.humidity
-        for (var i = 0; i < 30; i++) {
-            t = Math.max(tempMin, Math.min(tempMax, t + (Math.random() - 0.5) * 0.6))
-            u = Math.max(0, Math.min(100, u + (Math.random() - 0.5) * 1.2))
-            h.push({ temp: t, hum: u })
-        }
-        history = h
-    }
+    Component.onCompleted: history = []
 
     // ======================= reusable pieces ===============================
     component GlowCard: Rectangle {
@@ -324,6 +318,7 @@ Window {
                         width: (parent.width - 20) / 2; height: parent.height
                         readonly property bool isTemp: index === 0
                         readonly property real val: isTemp ? root.dispTemp : root.dispHum
+                        readonly property bool available: isTemp ? sentry.tempAvailable : sentry.humidityAvailable
 
                         Canvas {  // glow halo behind card, pulsed on data arrival
                             anchors.fill: card; anchors.margins: -50
@@ -357,18 +352,19 @@ Window {
                                 Row {
                                     spacing: 6
                                     Text {
-                                        text: val.toFixed(2)
+                                        text: available ? val.toFixed(2) : "--"
                                         color: "#eaf6ff"; font.family: monoFont
                                         font.pixelSize: 64; font.weight: Font.DemiBold
                                     }
                                     Text {
                                         anchors.baseline: parent.children[0].baseline
-                                        text: modelData.unit
+                                        text: available ? modelData.unit : ""
                                         color: "#7fd4ff"; font.family: monoFont; font.pixelSize: 28
                                     }
                                 }
                                 Text {
-                                    text: modelData.range + " · updated " + sentry.lastUpdate
+                                    text: available ? modelData.range + " · updated " + sentry.lastUpdate
+                                                    : (isTemp ? sentry.sensorErrorText : "Not provided by " + sentry.sensorKindName)
                                     color: "#5a6472"; font.family: uiFont; font.pixelSize: 13
                                 }
                             }
@@ -376,8 +372,8 @@ Window {
                                 anchors.right: parent.right; anchors.rightMargin: 32
                                 anchors.verticalCenter: parent.verticalCenter
                                 gradA: modelData.ga; gradB: modelData.gb
-                                pct: isTemp ? (val - root.tempMin) / (root.tempMax - root.tempMin)
-                                            : val / 100
+                                pct: available ? (isTemp ? (val - root.tempMin) / (root.tempMax - root.tempMin)
+                                                         : val / 100) : 0
                             }
                         }
                     }
@@ -435,12 +431,15 @@ Window {
                             var stepX = W / (hist.length - 1)
                             function pts(key, min, max) {
                                 var out = []
-                                for (var i = 0; i < hist.length; i++)
-                                    out.push({ x: i * stepX,
-                                               y: H - ((hist[i][key] - min) / (max - min)) * (H - 6) - 3 })
+                                for (var i = 0; i < hist.length; i++) {
+                                    if (hist[i][key] !== null)
+                                        out.push({ x: i * stepX,
+                                                   y: H - ((hist[i][key] - min) / (max - min)) * (H - 6) - 3 })
+                                }
                                 return out
                             }
                             function drawLine(p, color, fillTop) {
+                                if (p.length < 2) return
                                 ctx.beginPath()
                                 for (var i = 0; i < p.length; i++)
                                     i === 0 ? ctx.moveTo(p[i].x, p[i].y) : ctx.lineTo(p[i].x, p[i].y)
@@ -564,7 +563,71 @@ Window {
                         }
                         MouseArea { id: reconnectMa; anchors.fill: parent; onClicked: sentry.reconnect() }
                     }
+                    Rectangle {  // sensor configuration button
+                        anchors.right: parent.right; anchors.rightMargin: 190
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 150; height: 48; radius: 10
+                        color: "#147FD4FF"; border.width: 1; border.color: "#4D7FD4FF"
+                        Column {
+                            anchors.centerIn: parent
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: "SENSOR MODE"; color: "#7fd4ff"; font.bold: true; font.pixelSize: 11 }
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: sentry.sensorModeName; color: "#8b95a3"; font.pixelSize: 9 }
+                        }
+                        MouseArea { anchors.fill: parent; onClicked: root.configPanelOpen = true }
+                    }
                 }
+            }
+        }
+
+        // ---------------- SENSOR MODE / INTERVAL ----------------
+        Rectangle {
+            anchors.fill: parent; color: "#CC05070A"; visible: root.configPanelOpen; z: 19
+            MouseArea { anchors.fill: parent; onClicked: root.configPanelOpen = false }
+            Rectangle {
+                anchors.centerIn: parent; width: 720; height: 450; radius: 20
+                color: "#F20A0E14"; border.width: 1; border.color: "#4D7FD4FF"
+                MouseArea { anchors.fill: parent }
+                Column {
+                    anchors.fill: parent; anchors.margins: 30; spacing: 18
+                    Text { text: "SS1 SENSOR CONFIGURATION"; color: "#eaf6ff"; font.pixelSize: 22; font.bold: true }
+                    Text { text: sentry.sensorKindName + " · " + sentry.sensorErrorText; color: sentry.sensorError === 0 || sentry.sensorError === 5 ? "#5eead4" : "#ff6b6b"; font.pixelSize: 13 }
+                    Text { text: "OPERATING MODE"; color: "#5a6472"; font.pixelSize: 11; font.letterSpacing: 1.4 }
+                    Row {
+                        spacing: 12
+                        Repeater {
+                            model: [{n:"DEBUG", d:"UART + GPIO I²C"}, {n:"NORMAL I²C", d:"TWIM30, silent"}, {n:"EXTERNAL", d:"SHT4x / thermistor"}]
+                            Rectangle {
+                                width: 208; height: 72; radius: 10
+                                color: sentry.sensorMode === index ? "#267FD4FF" : "#0DFFFFFF"
+                                border.width: 1; border.color: sentry.sensorMode === index ? "#7fd4ff" : "#267FD4FF"
+                                Column { anchors.centerIn: parent; spacing: 4
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.n; color: "#eaf6ff"; font.bold: true; font.pixelSize: 12 }
+                                    Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.d; color: "#8b95a3"; font.pixelSize: 10 }
+                                }
+                                MouseArea { anchors.fill: parent; onClicked: sentry.setSensorMode(index) }
+                            }
+                        }
+                    }
+                    Text { text: "Changing mode saves the setting and reboots this SS1. Normal I²C intentionally has no UART output."; color: "#8b95a3"; font.pixelSize: 11 }
+                    Rectangle { width: parent.width; height: 1; color: "#267FD4FF" }
+                    Text { text: "SAMPLING INTERVAL"; color: "#5a6472"; font.pixelSize: 11; font.letterSpacing: 1.4 }
+                    Row {
+                        anchors.horizontalCenter: parent.horizontalCenter; spacing: 24
+                        Rectangle { width: 64; height: 48; radius: 10; color: "#147FD4FF"; border.width: 1; border.color: "#4D7FD4FF"
+                            Text { anchors.centerIn: parent; text: "−"; color: "#7fd4ff"; font.pixelSize: 26 }
+                            MouseArea { anchors.fill: parent; onClicked: sentry.setSampleInterval(Math.max(0, sentry.sampleInterval - 1)) }
+                        }
+                        Column { width: 220; anchors.verticalCenter: parent.verticalCenter
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: sentry.sampleInterval === 0 ? "FAST · 0.5 SECONDS" : sentry.sampleInterval + " SECONDS"; color: "#eaf6ff"; font.family: monoFont; font.pixelSize: 18; font.bold: true }
+                            Text { anchors.horizontalCenter: parent.horizontalCenter; text: "Allowed range 0–30 seconds"; color: "#8b95a3"; font.pixelSize: 10 }
+                        }
+                        Rectangle { width: 64; height: 48; radius: 10; color: "#147FD4FF"; border.width: 1; border.color: "#4D7FD4FF"
+                            Text { anchors.centerIn: parent; text: "+"; color: "#7fd4ff"; font.pixelSize: 26 }
+                            MouseArea { anchors.fill: parent; onClicked: sentry.setSampleInterval(Math.min(30, sentry.sampleInterval + 1)) }
+                        }
+                    }
+                }
+                Text { anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 14; text: "×"; color: "#8b95a3"; font.pixelSize: 28; MouseArea { anchors.fill: parent; anchors.margins: -12; onClicked: root.configPanelOpen = false } }
             }
         }
 

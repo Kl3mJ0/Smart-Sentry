@@ -26,6 +26,14 @@ class FakeDriver:
     async def run(self):
         b = self.backend
         await self._connect_sequence()
+        b.set_sensor_mode(0)
+        b.set_sensor_mode_name("Debug")
+        b.set_sample_interval(2)
+        b.set_sample_interval_ms(2000)
+        b.set_sensor_kind(2)
+        b.set_sensor_kind_name("Onboard SHT4x")
+        b.set_sensor_error(0)
+        b.set_sensor_error_text("OK")
         b.set_temp(self._temp)
         b.set_humidity(self._hum)
         while True:
@@ -56,6 +64,15 @@ class FakeDriver:
 
     def reconnect(self):
         asyncio.get_event_loop().create_task(self._do_reconnect())
+
+    def set_mode(self, mode):
+        names = {0: "Debug", 1: "Normal I2C", 2: "External Auto"}
+        self.backend.set_sensor_mode(mode)
+        self.backend.set_sensor_mode_name(names.get(mode, "Unknown"))
+
+    def set_interval(self, seconds):
+        self.backend.set_sample_interval(seconds)
+        self.backend.set_sample_interval_ms(500 if seconds == 0 else seconds * 1000)
 
     def cycle_conn_state(self):
         b = self.backend
